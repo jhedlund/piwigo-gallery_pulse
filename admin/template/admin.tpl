@@ -18,7 +18,7 @@
       {/foreach}
     </select>
   </label>
-  {if $GP_TAB == 'photos'}
+  {if $GP_TAB == 'photos' || $GP_TAB == 'visitors'}
   <label>Album
     <select name="cat" onchange="this.form.submit()">
       <option value="">All</option>
@@ -27,32 +27,63 @@
       {/foreach}
     </select>
   </label>
-  {elseif $GP_TAB == 'visitors'}
-  <label>Share link
-    <select name="link" onchange="this.form.submit()">
-      <option value="">All</option>
-      {foreach from=$GP_LINKS key=t item=name}
-      <option value="{$t}"{if $t == $GP_LINK} selected{/if}>{$name|escape}</option>
-      {/foreach}
-    </select>
-  </label>
   {/if}
 </form>
 {/if}
+
+{* Hover preview: one shared popup to the right of the thumbnail. *}
+{footer_script}
+(function () {
+  var pop = document.createElement('div');
+  pop.className = 'gp-preview';
+  var big = document.createElement('img');
+  big.alt = '';
+  pop.appendChild(big);
+  document.body.appendChild(pop);
+  var current = null;
+
+  function place() {
+    if (!current) { return; }
+    var r = current.getBoundingClientRect();
+    var h = pop.offsetHeight, w = pop.offsetWidth;
+    var top = Math.max(8, Math.min(r.top + r.height / 2 - h / 2, window.innerHeight - h - 8));
+    var left = r.right + 12;
+    if (left + w > window.innerWidth - 8) { left = Math.max(8, r.left - w - 12); }
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+  }
+
+  document.addEventListener('mouseover', function (ev) {
+    var t = ev.target;
+    if (!t.matches || !t.matches('.gp-photo img[data-preview]') || t === current) { return; }
+    current = t;
+    big.onload = function () { if (current === t) { pop.classList.add('gp-shown'); place(); } };
+    big.src = t.getAttribute('data-preview');
+    if (big.complete && big.naturalWidth) { big.onload(); }
+  });
+  document.addEventListener('mouseout', function (ev) {
+    if (ev.target === current) {
+      current = null;
+      pop.classList.remove('gp-shown');
+    }
+  });
+  window.addEventListener('scroll', place, true);
+})();
+{/footer_script}
 
 {* ------------------------------------------------------------------ Live *}
 {if $GP_TAB == 'live'}
 <p class="gp-note">Newest first, updated within a second while guests are active (every 5 seconds when quiet); opens with the latest {$GP_LIVE_PAGE} events, and Show older pages further back. Admin sessions are not tracked — open a share link in a private window to see yourself here.</p>
 <table class="table2 gp-table" id="gp-live">
-  <thead><tr><th>Time</th><th>Guest</th><th>Link</th><th>Event</th><th>Photo</th><th>Value</th><th>Device</th></tr></thead>
+  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Link</th><th>Event</th><th>Photo</th><th>Value</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_EVENTS item=e}
     <tr data-id="{$e.id}">
-      <td>{$e.occurred_at}</td>
+      <td>{$e.occurred_at_display}</td>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$e.sid}">{$e.guest}</a></td>
       <td>{$e.link_name|escape}</td>
       <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}</td>
-      <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
+      <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" data-preview="{$e.preview}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
       <td>{$e.value}</td>
       <td>{$e.device}</td>
     </tr>
@@ -94,7 +125,7 @@
     var tr = document.createElement('tr');
     tr.setAttribute('data-id', e.id);
     tr.className = 'gp-new';
-    cell(tr, e.occurred_at);
+    cell(tr, e.occurred_at_display);
     var a = document.createElement('a');
     a.href = visitorsUrl + e.sid;
     a.textContent = e.guest;
@@ -114,6 +145,7 @@
       link.href = e.detail_url;
       var img = document.createElement('img');
       img.src = e.thumb;
+      img.setAttribute('data-preview', e.preview);
       img.alt = '';
       link.appendChild(img);
       link.appendChild(document.createTextNode(' ' + (e.image_name || '')));
@@ -229,7 +261,7 @@
   <tbody>
   {foreach from=$GP_PHOTOS item=p}
     <tr>
-      <td class="gp-photo">{if $p.thumb}<a href="{$p.detail_url|escape}&amp;days={$GP_DAYS}"><img src="{$p.thumb}" alt=""> {$p.image_name|escape}</a>{else}#{$p.image_id}{/if}</td>
+      <td class="gp-photo">{if $p.thumb}<a href="{$p.detail_url|escape}&amp;days={$GP_DAYS}"><img src="{$p.thumb}" data-preview="{$p.preview}" alt=""> {$p.image_name|escape}</a>{else}#{$p.image_id}{/if}</td>
       <td>{$p.views}</td>
       <td>{$p.page_views}</td>
       <td>{$p.guests}</td>
@@ -284,14 +316,14 @@
 {if !empty($GP_PHOTO.guests)}
 <h4>Guests</h4>
 <table class="table2 gp-table">
-  <thead><tr><th>Guest</th><th>Link</th><th>Device</th><th>Last seen</th><th>Views</th><th>Dwell (s)</th><th>Max zoom</th><th>Save intent</th><th>Downloads</th></tr></thead>
+  <thead><tr><th>Guest</th><th>Link</th><th>Device</th><th>Last seen ({$GP_TZ})</th><th>Views</th><th>Dwell (s)</th><th>Max zoom</th><th>Save intent</th><th>Downloads</th></tr></thead>
   <tbody>
   {foreach from=$GP_PHOTO.guests item=g}
     <tr>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$g.sid}">{$g.guest}</a></td>
       <td>{$g.link_name|escape}</td>
       <td>{$g.device}</td>
-      <td>{$g.last_seen}</td>
+      <td>{$g.last_seen_display}</td>
       <td>{$g.views}</td>
       <td>{$g.dwell_total}</td>
       <td>{if $g.max_zoom}{$g.max_zoom}&times;{/if}</td>
@@ -306,11 +338,11 @@
 {if !empty($GP_PHOTO.timeline)}
 <h4>Events</h4>
 <table class="table2 gp-table">
-  <thead><tr><th>Time</th><th>Guest</th><th>Link</th><th>Event</th><th>Value</th><th>Device</th></tr></thead>
+  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Link</th><th>Event</th><th>Value</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_PHOTO.timeline item=e}
     <tr>
-      <td>{$e.occurred_at}</td>
+      <td>{$e.occurred_at_display}</td>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$e.sid}">{$e.guest}</a></td>
       <td>{$e.link_name|escape}</td>
       <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}</td>
@@ -328,19 +360,19 @@
 {if $GP_TAB == 'visitors'}
 {if isset($GP_SID)}
 <p><a href="{$GP_ADMIN}-visitors">&larr; All visitors</a></p>
-<h3>Guest {$GP_SID|truncate:8:''}</h3>
+<h3>{if $GP_USERNAME}{$GP_USERNAME|escape} <span class="gp-detail">browser {$GP_SID|truncate:8:''}</span>{else}Guest {$GP_SID|truncate:8:''}{/if}</h3>
 {if empty($GP_TIMELINE)}
 <p>No events for this guest.</p>
 {else}
 <table class="table2 gp-table">
-  <thead><tr><th>Time</th><th>Link</th><th>Event</th><th>Photo / album</th><th>Value</th><th>Device</th></tr></thead>
+  <thead><tr><th>Time ({$GP_TZ})</th><th>Link</th><th>Event</th><th>Photo / album</th><th>Value</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_TIMELINE item=e}
     <tr>
-      <td>{$e.occurred_at}</td>
+      <td>{$e.occurred_at_display}</td>
       <td>{$e.link_name|escape}</td>
       <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}</td>
-      <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
+      <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" data-preview="{$e.preview}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
       <td>{$e.value}{if $e.event == 'dwell'} s{elseif $e.event == 'zoom'}&times;{/if}</td>
       <td>{$e.device}</td>
     </tr>
@@ -349,20 +381,20 @@
 </table>
 {/if}
 {else}
-<p class="gp-note">One row per browser (a first-party cookie kept 30 days). "no beacon" collects downloads from browsers that never ran the tracking script.</p>
+<p class="gp-note">One row per browser (a first-party cookie kept 30 days), named by username when a registered user was logged in. "no beacon" collects downloads from browsers that never ran the tracking script. The share link each event came through is on the visitor's timeline.</p>
 {if empty($GP_VISITORS)}
 <p>No visitors in this period.</p>
 {else}
 <table class="table2 gp-table">
-  <thead><tr><th>Guest</th><th>Link</th><th>Device</th><th>First seen</th><th>Last seen</th><th>Photos</th><th>Dwell (s)</th><th>Zooms</th><th>Save intent</th><th>Downloads</th></tr></thead>
+  <thead><tr><th>Visitor</th><th>Albums</th><th>Device</th><th>First seen ({$GP_TZ})</th><th>Last seen ({$GP_TZ})</th><th>Photos</th><th>Dwell (s)</th><th>Zooms</th><th>Save intent</th><th>Downloads</th></tr></thead>
   <tbody>
   {foreach from=$GP_VISITORS item=v}
     <tr>
-      <td><a href="{$GP_ADMIN}-visitors&amp;sid={$v.sid}">{$v.guest}</a></td>
-      <td>{$v.link_name|escape}</td>
+      <td><a href="{$GP_ADMIN}-visitors&amp;sid={$v.sid}">{if $v.username}{$v.username|escape}{else}{$v.guest}{/if}</a></td>
+      <td title="{$v.albums_all|escape}">{$v.album_first|escape}{if $v.albums_more} <span class="gp-detail">+{$v.albums_more} more</span>{/if}</td>
       <td>{$v.device}</td>
-      <td>{$v.first_seen}</td>
-      <td>{$v.last_seen}</td>
+      <td>{$v.first_seen_display}</td>
+      <td>{$v.last_seen_display}</td>
       <td>{$v.photos}</td>
       <td>{$v.dwell_total}</td>
       <td>{$v.zooms}</td>
@@ -376,24 +408,28 @@
 {/if}
 {/if}
 
-{* ----------------------------------------------------------------- Links *}
-{if $GP_TAB == 'links'}
-{if empty($GP_LINK_STATS)}
+{* ---------------------------------------------------------------- Albums *}
+{if $GP_TAB == 'albums'}
+<p class="gp-note">One row per album, counting what guests did while looking at it. Since 1.2 a photo's events go to the album it was viewed in; older events go to the first album the photo is filed in. <b>Via</b> lists how guests got there, busiest first: a share link, or <i>direct</i> for public pages and logged-in users. Counts here are for the album itself; its Photos link includes sub-albums.</p>
+{if empty($GP_ALBUM_STATS)}
 <p>No activity in this period.</p>
 {else}
 <table class="table2 gp-table">
-  <thead><tr><th>Share link</th><th>Guests</th><th>Views</th><th>Zooms</th><th>Save intent</th><th>Downloads</th><th>Last activity</th><th></th></tr></thead>
+  <thead><tr><th>Album</th><th>Via</th><th>Guests</th><th>Album views</th><th>Views</th><th>Photo page</th><th>Zooms</th><th>Save intent</th><th>Downloads</th><th>Last activity ({$GP_TZ})</th><th></th></tr></thead>
   <tbody>
-  {foreach from=$GP_LINK_STATS item=l}
+  {foreach from=$GP_ALBUM_STATS item=a}
     <tr>
-      <td>{if $l.link_name}{$l.link_name|escape}{else}<i>Not via a share link</i>{/if}</td>
-      <td>{$l.guests}</td>
-      <td>{$l.views}</td>
-      <td>{$l.zooms}</td>
-      <td>{$l.saves}</td>
-      <td>{$l.downloads}</td>
-      <td>{$l.last_seen}</td>
-      <td>{if $l.share_token}{if $l.category_id}<a href="{$GP_ADMIN}-photos&amp;days={$GP_DAYS}&amp;cat={$l.category_id}">Photos</a> · {/if}<a href="{$GP_ADMIN}-visitors&amp;days={$GP_DAYS}&amp;link={$l.share_token}">Visitors</a>{/if}</td>
+      <td>{if $a.album_name}<a href="{$GP_ADMIN}-photos&amp;days={$GP_DAYS}&amp;cat={$a.category_id}">{$a.album_name|escape}</a>{elseif $a.category_id}#{$a.category_id} <span class="gp-detail">deleted</span>{else}<i>Unknown</i>{/if}</td>
+      <td class="gp-detail">{$a.via|escape}</td>
+      <td>{$a.guests}</td>
+      <td>{$a.album_views}</td>
+      <td>{$a.views}</td>
+      <td>{$a.page_views}</td>
+      <td>{$a.zooms}</td>
+      <td>{$a.saves}</td>
+      <td>{$a.downloads}</td>
+      <td>{$a.last_seen_display}</td>
+      <td>{if $a.album_name}<a href="{$GP_ADMIN}-visitors&amp;days={$GP_DAYS}&amp;cat={$a.category_id}">Visitors</a>{/if}</td>
     </tr>
   {/foreach}
   </tbody>
@@ -411,9 +447,19 @@
     </label>
   </p>
   <p class="gp-note">Older events are deleted once a day. Lowering this deletes data on the next run; it can't be brought back.</p>
+  <p>
+    <label>Show times in
+      <select name="timezone">
+        {foreach from=$GP_TIMEZONES item=z}
+        <option value="{$z}"{if $z == $GP_TIMEZONE} selected{/if}>{$z}</option>
+        {/foreach}
+      </select>
+    </label>
+  </p>
+  <p class="gp-note">Events are stored in UTC; only what you see is converted, with daylight saving applied.</p>
   <p><input type="submit" name="save" value="Save" class="buttonLike"></p>
 </form>
-<p class="gp-note">The event table holds {$GP_TABLE.rows} events{if $GP_TABLE.oldest}, the oldest from {$GP_TABLE.oldest}{/if}, using {$GP_TABLE.size_mb} MB.</p>
+<p class="gp-note">The event table holds {$GP_TABLE.rows} events{if $GP_TABLE.oldest}, the oldest from {$GP_TABLE.oldest} {$GP_TZ}{/if}, using {$GP_TABLE.size_mb} MB.</p>
 {/if}
 
 </div>

@@ -31,7 +31,9 @@ function gallery_pulse_ws_track($params, &$service)
   }
 
   $token = isset($params['token']) ? stripslashes($params['token']) : null;
-  $rows = gallery_pulse_build_rows($sid, $token, $events);
+  // Touch-screen hint, only used to tell an iPad from a Mac.
+  $touch = isset($params['touch']) && in_array($params['touch'], array('0', '1'), true) ? $params['touch'] === '1' : null;
+  $rows = gallery_pulse_build_rows($sid, $token, $events, $touch);
   gallery_pulse_insert($rows);
   gallery_pulse_maybe_prune();
 

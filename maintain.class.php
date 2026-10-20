@@ -52,6 +52,6 @@ CREATE TABLE IF NOT EXISTS `' . $this->table . '` (
   function uninstall()
   {
     pwg_query('DROP TABLE IF EXISTS `' . $this->table . '`;');
-    conf_delete_param(array('gallery_pulse_last_prune', 'gallery_pulse_retention_days'));
+    conf_delete_param(array('gallery_pulse_last_prune', 'gallery_pulse_retention_days', 'gallery_pulse_timezone'));
   }
 }

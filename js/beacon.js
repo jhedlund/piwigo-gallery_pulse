@@ -61,14 +61,17 @@
       var out = { e: ev.e, img: ev.img, ago: t - ev.t };
       if (ev.v !== undefined) { out.v = ev.v; }
       if (ev.d !== undefined) { out.d = ev.d; }
-      if (ev.cat !== undefined) { out.cat = ev.cat; }
-      if (ev.ctok !== undefined) { out.ctok = ev.ctok; }
+      // Every event names the page's album; the server checks the photo is in it.
+      if (config.cat) { out.cat = config.cat; }
+      if (catToken) { out.ctok = catToken; }
       return out;
     });
     var body = new URLSearchParams();
     body.set('method', 'galleryPulse.track');
     body.set('sid', sid);
     if (token) { body.set('token', token); }
+    // iPadOS reports a Mac User-Agent; a touch screen tells them apart.
+    body.set('touch', navigator.maxTouchPoints > 1 ? '1' : '0');
     body.set('events', JSON.stringify(events));
 
     var sent = false;
@@ -264,10 +267,7 @@
       writeSid(sid);
       // Lightbox events may already be queued (opened from #pid on load); they
       // flush now that the endpoint is known.
-      var view = { d: config.page };
-      if (config.cat) { view.cat = config.cat; }
-      if (catToken) { view.ctok = catToken; }
-      push('page_view', config.page === 'photo' ? config.img : null, view);
+      push('page_view', config.page === 'photo' ? config.img : null, { d: config.page });
       bindSaveIntent();
       bindLifecycle();
     }

@@ -10,10 +10,10 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 | Tab | Shows |
 |---|---|
 | Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen |
-| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads. Sortable; filterable by period and by album (an album includes its sub-albums). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately |
-| Visitors | One row per browser; click a row for that guest's timeline |
-| Links | Totals per share link, named by the shared album's full path |
-| Settings | Retention, and the event table's size |
+| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads. Sortable; filterable by period and by album (an album includes its sub-albums). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
+| Visitors | One row per browser, by username when a registered user was logged in, with the albums they visited; filterable by album. Click a row for the visitor's timeline, which also shows the share link of each event |
+| Albums | Totals per album (full path), with the routes guests came by: each share link, or *direct* for public pages and logged-in users |
+| Settings | Retention, display time zone, and the event table's size |
 
 ## What is recorded
 
@@ -35,6 +35,23 @@ renewed on each visit). No IP addresses are stored.
 **Views** in the admin are lightbox views only. Photo-page opens are a separate
 column, so a guest who opens the photo page and then its lightbox isn't counted
 twice.
+
+**Album:** each photo event is filed under the album the guest was looking at.
+The beacon sends the page's album with every event (the URL's `c-` token under a
+share link, the numeric id otherwise). The server uses it only if the album is
+within the share link's albums (or visible to the visitor, without a link) **and**
+the photo is filed in it; otherwise the event goes to the lowest-id album the photo
+is filed in. Events from before 1.2, and downloads, always use that fallback.
+
+**Device** is parsed from the User-Agent: `iphone`, `ipad`, `android`, `windows`,
+`mac`, `linux` or `other`. iPadOS reports itself as a Mac, so the beacon sends a
+touch-screen hint that turns a Mac into an iPad; downloads don't carry the hint, so
+an iPad download shows as `mac`. Events from before 1.2 say `phone`, `tablet` or
+`desktop`.
+
+**Times** are stored in UTC (MySQL `NOW()`, on a database server that runs in UTC)
+and shown in the time zone set on the Settings tab, default `America/New_York`,
+with daylight saving applied. Table headers name the zone.
 
 **Share link** is the `/v/<key>` in the page URL. The server checks it against
 UnlistedAlbum's table, and every image or category in an event must belong to that

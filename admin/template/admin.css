@@ -8,9 +8,10 @@
 .gp-wrap table.gp-totals { width: auto; margin-left: 0; margin-right: auto; }
 .gp-totals td, .gp-totals th { padding-right: 24px; }
 .gp-photo img { height: 40px; width: auto; vertical-align: middle; margin-right: 6px; border-radius: 3px; }
-/* Hover preview: transform, so the row keeps its height. */
-.gp-photo img { position: relative; transition: transform .15s ease, box-shadow .15s ease; transform-origin: left center; }
-.gp-photo img:hover { transform: scale(3.5); z-index: 10; box-shadow: 0 4px 18px rgba(0, 0, 0, .45); }
+/* Hover preview: fixed popup beside the thumbnail, so no row is covered or moved. */
+.gp-preview { position: fixed; z-index: 1000; display: none; pointer-events: none; padding: 4px; background: #fff; border-radius: 5px; box-shadow: 0 6px 24px rgba(0, 0, 0, .45); }
+.gp-preview.gp-shown { display: block; }
+.gp-preview img { display: block; max-width: 480px; max-height: 360px; border-radius: 3px; }
 .gp-photo-head { display: flex; align-items: flex-start; gap: 20px; margin: 10px 0 20px; }
 .gp-photo-head img { max-width: 480px; max-height: 360px; border-radius: 4px; }
 .gp-photo-head h3 { margin-top: 0; }
