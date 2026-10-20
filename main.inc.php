@@ -1,7 +1,7 @@
 <?php
 /*
 Plugin Name: Gallery Pulse
-Version: 1.3.0
+Version: 1.4.0
 Description: Engagement analytics for shared albums — lightbox views, dwell, zoom, save intent and downloads, per share link and per guest.
 Plugin URI: https://jhedlund.com
 Author: jhedlund
@@ -44,6 +44,9 @@ else
   // Downloads are logged server-side: core history rows for action.php carry no
   // category and no share link, so they can't be attributed per link.
   add_event_handler('loc_action_before_http_headers', 'gallery_pulse_log_download');
+
+  // Batch Downloader zips: one download per photo. Never fires without it.
+  add_event_handler('batchdownload_end_zip', 'gallery_pulse_log_zip');
 }
 
 function gallery_pulse_admin_menu($menu)

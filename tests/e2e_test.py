@@ -288,6 +288,135 @@ def device_os(token):
     sql("DELETE FROM piwigo_pulse_event WHERE id > %d" % since)
 
 
+def zip_rows(since):
+    return [r for r in events_since(since) if r[4] == "download" and r[6] == "zip"]
+
+
+def harness(calls, token=""):
+    subprocess.run(["docker", "exec", "-w", "/var/www/html/photos", "gallery-pulse-test-web-1", "php",
+                    "plugins/gallery_pulse/tests/zip_harness.php", json.dumps(calls), token],
+                   capture_output=True, text=True, check=True)
+
+
+def zips(p, link, token):
+    """Batch Downloader: one download per photo in each zip as it is built."""
+    import re
+    top_id = sql("SELECT category_id FROM piwigo_unlisted_albums WHERE random_key = '%s'" % token)[0][0]
+    sub_id = sql("SELECT id FROM piwigo_categories WHERE name = 'Second Half'")[0][0]
+    top_imgs = sorted(r[0] for r in sql("SELECT image_id FROM piwigo_image_category WHERE category_id = %s" % top_id))
+    sub_imgs = sorted(r[0] for r in sql("SELECT image_id FROM piwigo_image_category WHERE category_id = %s" % sub_id))
+    conf = sql("SELECT value FROM piwigo_config WHERE param = 'batch_download'")[0][0]
+    # Share-link visitors are guests; prod doesn't let guests zip, but the hook must handle it if enabled.
+    sql("REPLACE INTO piwigo_config (param, value) VALUES ('batch_download_guest_allowed', 'true')")
+    browser = p.chromium.launch()
+    try:
+        ctx = browser.new_context()
+        ctx.add_cookies([{"name": "pulse_sid", "value": "5" * 32, "url": BASE}])
+        req = ctx.request
+
+        since = max_id()
+        req.get(link)
+        req.get(link + "&action=advdown_set")
+        rows = zip_rows(since)
+        check(sorted(r[2] for r in rows) == top_imgs and all(r[1] == token and r[3] == top_id and r[0] == "5" * 32 for r in rows),
+              "zip: album zip under a share link = one row per photo, with the link, album and browser (%s)"
+              % [(r[2], r[3]) for r in rows])
+        set_id = sql("SELECT MAX(id) FROM piwigo_download_sets")[0][0]
+        since = max_id()
+        body = req.get(BASE + "plugins/BatchDownloader/download.php?set_id=%s&zip=1" % set_id).body()
+        check(body[:2] == b"PK" and zip_rows(since) == [], "zip: fetching the built zip again adds no rows")
+
+        # A set too big for one zip is built one zip per request, on /download/init_zip (no /v/ URL).
+        # Batch Downloader compares filesize (KB) with max_size*1024, so inflate the recorded sizes.
+        sql("UPDATE piwigo_config SET value = '%s' WHERE param = 'batch_download'"
+            % re.sub(r's:8:"max_size";i:\d+;', 's:8:"max_size";i:1;', conf).replace("'", "''"))
+        sql("UPDATE piwigo_images SET filesize = filesize + 100000")
+        since = max_id()
+        req.get(link)
+        req.get(link + "&action=advdown_set")  # redirects to init_zip, which readies the set
+        set_id = sql("SELECT MAX(id) FROM piwigo_download_sets")[0][0]
+        check(zip_rows(since) == [], "zip: preparing a multi-zip set logs nothing yet")
+        req.get(BASE + "index.php?/download/init_zip&set_id=%s&zip=1" % set_id)
+        first = zip_rows(since)
+        req.get(BASE + "index.php?/download/init_zip&set_id=%s&zip=2" % set_id)
+        both = zip_rows(since)
+        second = both[len(first):]
+        req.get(BASE + "index.php?/download/init_zip&set_id=%s&zip=1" % set_id)
+        check(len(first) >= 1 and len(second) >= 1 and not {r[2] for r in first} & {r[2] for r in second},
+              "zip: each zip of a multi-zip set logs only its own photos (%s / %s)" % ([r[2] for r in first], [r[2] for r in second]))
+        check(all(r[1] == token for r in both), "zip: later zips keep the share link via its session grant")
+        check(len(zip_rows(since)) == len(both), "zip: revisiting a built zip of the set adds no rows")
+        sql("UPDATE piwigo_config SET value = '%s' WHERE param = 'batch_download'" % conf.replace("'", "''"))
+        sql("UPDATE piwigo_images SET filesize = filesize - 100000 WHERE filesize > 100000")
+        ctx.close()
+
+        # A logged-in, non-admin user with access to the album (no share link).
+        admin = browser.new_context()
+        admin.request.post(BASE + "ws.php?format=json", form={"method": "pwg.session.login", "username": "admin", "password": "adminpass"})
+        tok = admin.request.post(BASE + "ws.php?format=json", form={"method": "pwg.session.getStatus"}).json()["result"]["pwg_token"]
+        made = admin.request.post(BASE + "ws.php?format=json", form={
+            "method": "pwg.users.add", "username": "gp_zipper", "password": "zipperpass", "pwg_token": tok}).json()
+        uid = made["result"]["users"][0]["id"]
+        members = str(admin.request.post(BASE + "ws.php?format=json", form={
+            "method": "pwg.categories.add", "name": "Members", "status": "private"}).json()["result"]["id"])
+        member_imgs = top_imgs[:2]
+        for img in member_imgs:
+            sql("INSERT INTO piwigo_image_category (image_id, category_id) VALUES (%s, %s)" % (img, members))
+        sql("UPDATE piwigo_user_cache SET need_update = 'true'")
+        admin.request.post(BASE + "ws.php?format=json", form={
+            "method": "pwg.permissions.add", "cat_id": members, "user_id": uid, "pwg_token": tok})
+        user = browser.new_context()
+        user.request.post(BASE + "ws.php?format=json", form={"method": "pwg.session.login", "username": "gp_zipper", "password": "zipperpass"})
+        since = max_id()
+        user.request.get(BASE + "index.php?/category/%s&action=advdown_set" % members)
+        rows = zip_rows(since)
+        check(sorted(r[2] for r in rows) == member_imgs and all(r[1] == "NULL" and r[3] == members for r in rows),
+              "zip: a logged-in user's album zip is logged, without a share link (%s)" % [(r[1], r[3]) for r in rows])
+        check(sql("SELECT DISTINCT user_id FROM piwigo_pulse_event WHERE id > %d" % since) == [[str(uid)]],
+              "zip: rows carry the user")
+
+        since = max_id()
+        admin.request.get(BASE + "index.php?/category/%s&action=advdown_set" % members)
+        made_set = sql("SELECT user_id FROM piwigo_download_sets ORDER BY id DESC LIMIT 1")[0][0]
+        check(made_set == "1" and zip_rows(since) == [], "zip: an admin's zip logs nothing")
+        admin.request.post(BASE + "ws.php?format=json", form={"method": "pwg.users.delete", "user_id": uid, "pwg_token": tok})
+        admin.request.post(BASE + "ws.php?format=json", form={
+            "method": "pwg.categories.delete", "category_id": members, "photo_deletion_mode": "no_delete", "pwg_token": tok})
+    finally:
+        browser.close()
+        sql("UPDATE piwigo_images SET filesize = filesize - 100000 WHERE filesize > 100000")
+        sql("UPDATE piwigo_config SET value = '%s' WHERE param = 'batch_download'" % conf.replace("'", "''"))
+        sql("DELETE FROM piwigo_config WHERE param = 'batch_download_guest_allowed'")
+
+    # Album attribution, through the trigger itself: a photo filed in both albums.
+    both_img = sub_imgs[0]
+    only_sub = sub_imgs[-1]
+    sql("INSERT INTO piwigo_image_category (image_id, category_id) VALUES (%s, %s)" % (both_img, top_id))
+    try:
+        since = max_id()
+        harness([[{"type": "category", "type_id": int(sub_id)}, [int(both_img)]],
+                 [{"type": "tags", "type_id": int(sub_id)}, [int(both_img)]],
+                 [{"type": "category", "type_id": int(top_id)}, [int(only_sub)]]], token)
+        got = [(r[2], r[3]) for r in zip_rows(since)]
+        check(got == [(both_img, sub_id), (both_img, top_id), (only_sub, sub_id)],
+              "zip: album zips credit their album when the photo is in it; other sets and other photos use the filed album (%s)" % got)
+        check(all(r[1] == token for r in zip_rows(since)), "zip: zips of the link's albums carry the link")
+
+        # An album outside the link, zipped while the session still holds the link.
+        outside = int(sql("SELECT MAX(id) FROM piwigo_categories")[0][0]) + 1000
+        sql("INSERT INTO piwigo_image_category (image_id, category_id) VALUES (%s, %d)" % (only_sub, outside))
+        since = max_id()
+        harness([[{"type": "category", "type_id": outside}, [int(only_sub)]]], token)
+        got = [(r[1], r[2], r[3]) for r in zip_rows(since)]
+        sql("DELETE FROM piwigo_image_category WHERE category_id = %d" % outside)
+        check(got == [("NULL", only_sub, str(outside))],
+              "zip: a zip of an album outside the link doesn't carry the link (%s)" % got)
+        sql("DELETE FROM piwigo_pulse_event WHERE id > %d" % since)
+    finally:
+        sql("DELETE FROM piwigo_image_category WHERE image_id = %s AND category_id = %s" % (both_img, top_id))
+        sql("UPDATE piwigo_user_cache SET need_update = 'true'")
+
+
 def downloads(link):
     """Repeat fetches within 60 s, HEAD and 404s don't add rows."""
     import http.cookiejar
@@ -504,16 +633,23 @@ def albums_tab(page, sid, token, top_id, sub_id, top_img):
     check("<h3>admin" in html, "visitors: timeline names the user")
 
 
+def save_settings(page):
+    # Wait for the response page: reading content straight after the click can
+    # catch the old page.
+    with page.expect_navigation():
+        page.click("input[name=save]")
+
+
 def time_zone(page):
     """Times shown in the configured zone; the Live poll still sorts on raw UTC."""
     admin_page(page, ADMIN + "-settings")
     check(page.input_value("select[name=timezone]") == "America/New_York", "tz: defaults to America/New_York")
     page.select_option("select[name=timezone]", "Asia/Tokyo")
-    page.click("input[name=save]")
+    save_settings(page)
     check(sql("SELECT value FROM piwigo_config WHERE param = 'gallery_pulse_timezone'") == [["Asia/Tokyo"]], "tz: setting saved")
     page.evaluate("""() => { const o = document.createElement('option'); o.value = 'Mars/Olympus'; o.selected = true;
                              document.querySelector('select[name=timezone]').appendChild(o); }""")
-    page.click("input[name=save]")
+    save_settings(page)
     check("Unknown time zone" in page.content(), "tz: unknown zone rejected")
 
     admin_page(page, ADMIN + "-live")
@@ -623,10 +759,10 @@ def admin(p, token):
     check(page.input_value("input[name=retention_days]") == "730", "settings: retention defaults to 730 days")
     page.fill("input[name=retention_days]", "5")
     page.evaluate("document.querySelector('input[name=retention_days]').removeAttribute('min')")
-    page.click("input[name=save]")
+    save_settings(page)
     check("between 30 and 3650" in page.content(), "settings: out-of-range retention rejected")
     page.fill("input[name=retention_days]", "400")
-    page.click("input[name=save]")
+    save_settings(page)
     check(sql("SELECT value FROM piwigo_config WHERE param = 'gallery_pulse_retention_days'") == [["400"]],
           "settings: retention saved")
     sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, event) VALUES "
@@ -655,6 +791,7 @@ def main():
         page_context(p, link, token)
         admin(p, token)
         viewed_album(p, link, token)
+        zips(p, link, token)
     device_os(token)
     downloads(link)
     no_js(link)

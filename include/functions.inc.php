@@ -574,6 +574,56 @@ function gallery_pulse_inject_beacon()
 }
 
 /**
+ * The browser's pulse_sid cookie, or the shared placeholder when it has none.
+ */
+function gallery_pulse_cookie_sid()
+{
+  $sid = isset($_COOKIE['pulse_sid']) ? stripslashes($_COOKIE['pulse_sid']) : '';
+  return gallery_pulse_valid_sid($sid) ? $sid : GALLERY_PULSE_NO_SID;
+}
+
+/**
+ * The share link this request came through: UnlistedAlbum's context for this
+ * request, or its session grant (1 h), which pages like Batch Downloader's
+ * /download/init_zip carry without a /v/ URL.
+ */
+function gallery_pulse_request_token()
+{
+  $context = function_exists('unlisted_album_get_current_context') ? unlisted_album_get_current_context() : false;
+  if (empty($context) && isset($GLOBALS['unlisted_album_context']))
+  {
+    $context = $GLOBALS['unlisted_album_context'];
+  }
+  return is_array($context) && isset($context['random_key']) && is_string($context['random_key']) ? $context['random_key'] : null;
+}
+
+/**
+ * Device for a server-side event. These carry no touch hint, so an iPad's
+ * Mac User-Agent would read as a Mac; take the beacon's answer for this
+ * browser when it has one.
+ */
+function gallery_pulse_request_device($sid)
+{
+  $device = gallery_pulse_device();
+  if ($device == 'mac' && $sid !== GALLERY_PULSE_NO_SID)
+  {
+    list($last) = pwg_db_fetch_row(pwg_query('
+SELECT device
+  FROM ' . GALLERY_PULSE_TABLE . '
+  WHERE sid = \'' . pwg_db_real_escape_string($sid) . '\'
+    AND event <> \'download\'
+  ORDER BY id DESC
+  LIMIT 1
+;'));
+    if ($last === 'ipad')
+    {
+      $device = 'ipad';
+    }
+  }
+  return $device;
+}
+
+/**
  * loc_action_before_http_headers: log an explicit download of a photo.
  * action.php has already checked the guest may see this image, but the hook
  * fires before its 404 and 304 branches, so those are screened out here.
@@ -596,11 +646,7 @@ function gallery_pulse_log_download()
   }
 
   $image_id = (int)$_GET['id'];
-  $sid = isset($_COOKIE['pulse_sid']) ? stripslashes($_COOKIE['pulse_sid']) : '';
-  if (!gallery_pulse_valid_sid($sid))
-  {
-    $sid = GALLERY_PULSE_NO_SID;
-  }
+  $sid = gallery_pulse_cookie_sid();
 
   // The theme's mobile share flow can fetch the same file twice for one tap
   // (fetch, then a fallback download when sharing fails).
@@ -610,6 +656,7 @@ SELECT COUNT(*)
   WHERE sid = \'' . pwg_db_real_escape_string($sid) . '\'
     AND image_id = ' . $image_id . '
     AND event = \'download\'
+    AND (detail IS NULL OR detail <> \'zip\')
     AND occurred_at > DATE_SUB(NOW(), INTERVAL 60 SECOND)
 ;'));
   if ($recent > 0)
@@ -617,12 +664,7 @@ SELECT COUNT(*)
     return;
   }
 
-  // UnlistedAlbum restores the share link's context for action.php from the session.
-  $token = null;
-  if (isset($GLOBALS['unlisted_album_context']['random_key']))
-  {
-    $token = $GLOBALS['unlisted_album_context']['random_key'];
-  }
+  $token = gallery_pulse_request_token();
   $scope = gallery_pulse_token_scope($token);
   $cats = gallery_pulse_image_categories(array($image_id), $scope);
   if (!isset($cats[$image_id]))
@@ -655,24 +697,7 @@ SELECT COUNT(*)
     }
   }
 
-  // Downloads carry no touch hint, so an iPad's Mac User-Agent would read as
-  // a Mac; take the beacon's answer for this browser when it has one.
-  $device = gallery_pulse_device();
-  if ($device == 'mac' && $sid !== GALLERY_PULSE_NO_SID)
-  {
-    list($last) = pwg_db_fetch_row(pwg_query('
-SELECT device
-  FROM ' . GALLERY_PULSE_TABLE . '
-  WHERE sid = \'' . pwg_db_real_escape_string($sid) . '\'
-    AND event <> \'download\'
-  ORDER BY id DESC
-  LIMIT 1
-;'));
-    if ($last === 'ipad')
-    {
-      $device = 'ipad';
-    }
-  }
+  $device = gallery_pulse_request_device($sid);
 
   global $user;
   gallery_pulse_insert(array(array(
@@ -687,4 +712,91 @@ SELECT device
     'detail' => $_GET['part'] == 'f' ? 'format' : null,
     'device' => $device,
   )));
+}
+
+/**
+ * batchdownload_end_zip (Batch Downloader): one download per photo in the zip
+ * just built. Fires once per zip of a set, with that zip's photos only, and
+ * not again when a built zip is fetched, so build time is the request count.
+ *
+ * @param array $data the download set row (type, type_id, ...)
+ * @param int[] $images_added ids of the photos in this zip
+ */
+function gallery_pulse_log_zip($data, $images_added)
+{
+  // Runs inside Batch Downloader's zip build: analytics must never break it.
+  try
+  {
+    gallery_pulse_log_zip_rows($data, $images_added);
+  }
+  catch (Throwable $e)
+  {
+    error_log('gallery_pulse: zip not logged: ' . $e->getMessage());
+  }
+}
+
+function gallery_pulse_log_zip_rows($data, $images_added)
+{
+  global $user;
+
+  if (is_admin() || empty($images_added) || !is_array($images_added))
+  {
+    return;
+  }
+  $image_ids = array_values(array_unique(array_filter(array_map('intval', $images_added))));
+  if (empty($image_ids))
+  {
+    return;
+  }
+
+  $sid = gallery_pulse_cookie_sid();
+  $token = gallery_pulse_request_token();
+  $scope = gallery_pulse_token_scope($token);
+
+  $album = null;
+  if (isset($data['type'], $data['type_id']) && $data['type'] == 'category' && (int)$data['type_id'] > 0)
+  {
+    $album = (int)$data['type_id'];
+    // The session can still hold a link while the guest zips an album outside
+    // it: that zip didn't come through the link.
+    if ($scope && !in_array($album, $scope['categories'], true))
+    {
+      $scope = false;
+    }
+  }
+
+  // Same scoping as a single download: photos inside the share link carry it,
+  // the rest are still downloads, just not attributable to a link.
+  $scoped = $scope ? gallery_pulse_image_categories($image_ids, $scope) : array();
+  $rest = array_values(array_diff($image_ids, array_keys($scoped)));
+  $unscoped = empty($rest) ? array() : gallery_pulse_image_categories($rest, false);
+
+  // An album zip names its album; prefer it wherever the photo is filed there.
+  $filed = $album === null ? array()
+    : gallery_pulse_filed_pairs(array_map(function ($id) use ($album) { return array($id, $album); }, $image_ids));
+
+  $device = gallery_pulse_request_device($sid);
+  $rows = array();
+  foreach ($image_ids as $id)
+  {
+    $in_scope = isset($scoped[$id]);
+    $category_id = $in_scope ? $scoped[$id] : (isset($unscoped[$id]) ? $unscoped[$id] : null);
+    if (isset($filed[$id . ':' . $album]))
+    {
+      $category_id = $album;
+    }
+    $rows[] = array(
+      'age' => 0,
+      'sid' => $sid,
+      'user_id' => isset($user['id']) ? (int)$user['id'] : null,
+      'share_token' => $in_scope ? $token : null,
+      'image_id' => $id,
+      'category_id' => $category_id,
+      'event' => 'download',
+      'value' => null,
+      'detail' => 'zip',
+      'device' => $device,
+    );
+  }
+  gallery_pulse_insert($rows);
 }
