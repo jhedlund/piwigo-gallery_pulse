@@ -9,7 +9,7 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 
 | Tab | Shows |
 |---|---|
-| Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen |
+| Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen. The Album column shows the album each event was viewed in (full path, linked to Photos filtered to it); the share link is on the visitor timeline |
 | Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads. Sortable; filterable by period and by album (an album includes its sub-albums). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
 | Visitors | One row per browser, by username when a registered user was logged in, with the albums they visited; filterable by album. Click a row for the visitor's timeline, which also shows the share link of each event |
 | Albums | Totals per album (full path), with the routes guests came by: each share link, or *direct* for public pages and logged-in users |

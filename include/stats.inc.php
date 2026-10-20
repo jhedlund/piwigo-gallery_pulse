@@ -236,8 +236,14 @@ function gallery_pulse_decorate_events(&$rows)
   $links = gallery_pulse_link_names();
   gallery_pulse_decorate_images($rows);
   gallery_pulse_decorate_categories($rows);
+  $paths = gallery_pulse_category_paths(array_filter(array_map(function ($r) { return $r['category_id']; }, $rows)));
   foreach ($rows as &$r)
   {
+    // The album the event is filed under (the one being viewed, since 1.2),
+    // linked to Photos filtered to it; no link once the album is deleted.
+    $r['album_path'] = $r['category_id'] !== null && isset($paths[$r['category_id']]) ? $paths[$r['category_id']] : null;
+    $r['album_url'] = $r['album_path'] === null ? null
+      : GALLERY_PULSE_ADMIN . '-photos&cat=' . (int)$r['category_id'] . '&days=' . gallery_pulse_retention_days();
     $r['id'] = (int)$r['id'];
     $r['guest'] = substr($r['sid'], 0, 8);
     $r['link_name'] = $r['share_token'] !== null && isset($links[$r['share_token']]) ? $links[$r['share_token']] : null;
