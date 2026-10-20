@@ -6,6 +6,7 @@ End-to-end check of Gallery Pulse against the local stack in dev/.
 Drives a real share link in desktop Chromium and an emulated iPhone (WebKit),
 then asserts on the rows that landed in piwigo_pulse_event.
 """
+import ipaddress
 import json
 import subprocess
 import sys
@@ -32,6 +33,17 @@ def events_since(since):
         "SELECT sid, share_token, IFNULL(image_id,''), IFNULL(category_id,''), event, IFNULL(value,''), "
         "IFNULL(detail,''), IFNULL(device,'') FROM piwigo_pulse_event WHERE id > %d ORDER BY id" % since
     )
+
+
+def ips_since(since, where="1"):
+    return [r[0] for r in sql("SELECT IFNULL(ip,'') FROM piwigo_pulse_event WHERE id > %d AND %s ORDER BY id" % (since, where))]
+
+
+def private_ip(ip):
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
 
 
 def wait_rows(since, predicate, timeout=20):
@@ -105,6 +117,9 @@ def desktop(p, link):
     check(len(downloads) == 1, "desktop: exactly one download row (%d)" % len(downloads))
     check(all(r[2] != "" for r in rows if r[4] != "page_view"), "desktop: photo events have image_id")
     check(all(r[7] == DESKTOP_OS for r in rows), "desktop: device = OS from the User-Agent (%s)" % rows[0][7])
+    ips = ips_since(since)
+    check(len(set(ips)) == 1 and private_ip(ips[0]),
+          "desktop: beacon and download rows all carry the request IP (%s)" % sorted(set(ips)))
     return pulse_sid
 
 
@@ -321,6 +336,9 @@ def zips(p, link, token):
         check(sorted(r[2] for r in rows) == top_imgs and all(r[1] == token and r[3] == top_id and r[0] == "5" * 32 for r in rows),
               "zip: album zip under a share link = one row per photo, with the link, album and browser (%s)"
               % [(r[2], r[3]) for r in rows])
+        ips = ips_since(since, "detail = 'zip'")
+        check(len(ips) == len(top_imgs) and len(set(ips)) == 1 and private_ip(ips[0]),
+              "zip: every zip row carries the request IP (%s)" % sorted(set(ips)))
         set_id = sql("SELECT MAX(id) FROM piwigo_download_sets")[0][0]
         since = max_id()
         body = req.get(BASE + "plugins/BatchDownloader/download.php?set_id=%s&zip=1" % set_id).body()
@@ -401,6 +419,7 @@ def zips(p, link, token):
         check(got == [(both_img, sub_id), (both_img, top_id), (only_sub, sub_id)],
               "zip: album zips credit their album when the photo is in it; other sets and other photos use the filed album (%s)" % got)
         check(all(r[1] == token for r in zip_rows(since)), "zip: zips of the link's albums carry the link")
+        check(set(ips_since(since, "detail = 'zip'")) == {"127.0.0.1"}, "zip: trigger rows carry REMOTE_ADDR")
 
         # An album outside the link, zipped while the session still holds the link.
         outside = int(sql("SELECT MAX(id) FROM piwigo_categories")[0][0]) + 1000
@@ -436,6 +455,8 @@ def downloads(link):
     rows = [r for r in events_since(since) if r[4] == "download"]
     check(len(rows) == 1, "download: two fetches + HEAD in 60 s = one row (%d)" % len(rows))
     check(rows and rows[0][1] == link.rsplit("/", 1)[-1], "download: attributed to the share link via session")
+    ips = ips_since(since, "event = 'download'")
+    check(len(ips) == 1 and private_ip(ips[0]), "download: row carries the request IP (%s)" % ips)
     sql("DELETE FROM piwigo_pulse_event WHERE id > %d" % since)
 
 
@@ -575,6 +596,126 @@ def live_album(ctx, sid, token, sub_id, sub_img):
     page.close()
 
 
+# Per row: Event cell text, the address as shown (location excluded), the
+# location line, and how many break points the address has.
+IP_CELLS = """([sel, ev]) => [...document.querySelectorAll(sel)].map(tr => {
+  const ip = tr.querySelector('td.gp-ip');
+  const loc = ip.querySelector('.gp-detail');
+  return {row: tr.textContent, event: tr.cells[ev].textContent.trim(),
+          ip: [...ip.childNodes].filter(n => n !== loc).map(n => n.textContent).join(''),
+          loc: loc ? loc.textContent : null, wbr: ip.querySelectorAll('wbr').length};
+})"""
+
+IP_WANT = [("dwell 1.2s", "81.2.69.160", "London, GB", 0), ("zoom 2.4×", "2001:218::1", "JP", 3),
+           ("fullscreen", "172.18.0.1", None, 0), ("fullscreen", "", None, 0)]
+
+
+def ip_rows(sid, token, img, cat, delta=0):
+    """Rows exercising the Event value suffix and the IP / location cell, oldest first."""
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event, value, ip) VALUES "
+        "(NOW() + INTERVAL %d SECOND, '%s', '%s', %s, %s, 'dwell', 1.2, '81.2.69.160'), "
+        "(NOW() + INTERVAL %d SECOND, '%s', '%s', %s, %s, 'zoom', 2.4, '2001:218::1'), "
+        "(NOW() + INTERVAL %d SECOND, '%s', '%s', %s, %s, 'fullscreen', NULL, '172.18.0.1'), "
+        "(NOW() + INTERVAL %d SECOND, '%s', '%s', %s, %s, 'fullscreen', NULL, NULL)"
+        % tuple(x for i in range(4) for x in (delta + i, sid, token, img, cat)))
+    return [r[0] for r in sql("SELECT id FROM piwigo_pulse_event ORDER BY id DESC LIMIT 4")][::-1]
+
+
+def ip_check(label, cells):
+    got = [(c["event"], c["ip"], c["loc"], c["wbr"]) for c in cells]
+    check(got == IP_WANT, "%s: value inline in Event, IP with location beneath (%s)" % (label, got))
+
+
+def table_head(page, table):
+    return [t.strip() for t in page.eval_on_selector_all(table + " thead th", "ths => ths.map(t => t.textContent)")]
+
+
+def live_ip(ctx, sid, token, img, cat):
+    """Live: Value column gone, IP column with location; polled rows match server-rendered ones."""
+    page = ctx.new_page()
+    page.goto(ADMIN + "-live")
+    head = table_head(page, "#gp-live")
+    check("Value" not in head and "IP" in head, "live ip: Value column replaced by IP (%s)" % head)
+    ids = ip_rows(sid, token, img, cat, 100)
+    for i in ids:
+        page.wait_for_selector("#gp-live tr[data-id='%s']" % i, timeout=5000)
+    sel = ", ".join("#gp-live tr[data-id='%s']" % i for i in ids)
+    # Newest first on screen.
+    polled = page.evaluate(IP_CELLS, [sel, head.index("Event")])[::-1]
+    ip_check("live ip (polled)", polled)
+    page.reload()
+    rendered = page.evaluate(IP_CELLS, [sel, head.index("Event")])[::-1]
+    strip = lambda cells: [{k: v for k, v in c.items() if k != "row"} for c in cells]
+    check(strip(polled) == strip(rendered), "live ip: polled rows match server-rendered rows (%s vs %s)"
+          % (strip(polled), strip(rendered)))
+    page.close()
+    sql("DELETE FROM piwigo_pulse_event WHERE id >= %s" % ids[0])
+
+
+def ip_tables(page, token, img, cat):
+    """Visitor timeline and photo detail: same Value -> IP swap, same cells as Live."""
+    sid = "7" * 32
+    ip_rows(sid, token, img, cat)
+    try:
+        for label, url, table, newest_first in (
+                ("timeline", ADMIN + "-visitors&sid=" + sid, ".gp-wrap > table:last-of-type", False),
+                ("photo detail", ADMIN + "-photo&image_id=%s" % img, ".gp-wrap > table:last-of-type", True)):
+            html, clean = admin_page(page, url)
+            head = table_head(page, table)
+            check(clean and "Value" not in head and "IP" in head, "%s: Value column replaced by IP (%s)" % (label, head))
+            cells = page.evaluate(IP_CELLS, [table + " tbody tr", head.index("Event")])
+            if newest_first:  # the detail lists every guest; the timeline only this one
+                cells = [c for c in cells if sid[:8] in c["row"]]
+            ip_check(label, cells[::-1] if newest_first else cells)
+    finally:
+        sql("DELETE FROM piwigo_pulse_event WHERE sid = '%s'" % sid)
+
+
+def geoip_setting(page, token, img, cat):
+    """A missing GeoIP file: pages render, no location, Settings says why; blank turns locations off."""
+    sid = "7" * 32
+    ip_rows(sid, token, img, cat)
+    conf = sql("SELECT value FROM piwigo_config WHERE param = 'gallery_pulse_geoip_path'")[0][0]
+    try:
+        admin_page(page, ADMIN + "-settings")
+        check(page.input_value("input[name=geoip_path]") == conf and "gp-warning" not in page.content(),
+              "geoip: working database path shown, no note")
+        for bad in ("relative.mmdb", "/tmp/it's.mmdb"):
+            page.fill("input[name=geoip_path]", bad)
+            save_settings(page)
+            check("must be an absolute path" in page.content(), "geoip: path %r rejected" % bad)
+        for path, note in (("/nonexistent/GeoLite2-City.mmdb", "can't be read"), ("/etc/hostname", "isn't a MaxMind database"), ("", None)):
+            admin_page(page, ADMIN + "-settings")
+            page.fill("input[name=geoip_path]", path)
+            save_settings(page)
+            html = page.content()
+            check(sql("SELECT CONCAT('[', value, ']') FROM piwigo_config WHERE param = 'gallery_pulse_geoip_path'") == [["[%s]" % path]]
+                  and page.input_value("input[name=geoip_path]") == path, "geoip: path %r saved" % path)
+            check((note in html.replace("&#39;", "'")) if note else ("gp-warning" not in html), "geoip: Settings note for %r" % path)
+            html, clean = admin_page(page, ADMIN + "-visitors&sid=" + sid)
+            locs = page.eval_on_selector_all("td.gp-ip .gp-detail", "ds => ds.map(d => d.textContent)")
+            check(clean and "81.2.69.160" in html and locs == [],
+                  "geoip: %r -> page renders, addresses without location (%s)" % (path, locs))
+    finally:
+        sql("REPLACE INTO piwigo_config (param, value) VALUES ('gallery_pulse_geoip_path', '%s')" % conf)
+        sql("DELETE FROM piwigo_pulse_event WHERE sid = '%s'" % sid)
+
+
+def upgrade():
+    """Activating 1.5 over a 1.4 table adds the ip column; old rows stay intact, with no IP."""
+    snap = ("SELECT COUNT(*), MD5(GROUP_CONCAT(CONCAT_WS('|', id, occurred_at, sid, event, IFNULL(value,''), "
+            "IFNULL(detail,''), IFNULL(device,'')) ORDER BY id)) FROM piwigo_pulse_event")
+    sql("ALTER TABLE piwigo_pulse_event DROP COLUMN ip")
+    sql("UPDATE piwigo_plugins SET version = '1.4.0' WHERE id = 'gallery_pulse'")
+    before = sql(snap)
+    urllib.request.urlopen(BASE + "index.php").read()
+    cols = [r[0] for r in sql("SHOW COLUMNS FROM piwigo_pulse_event")]
+    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.5.0"]], "upgrade: plugin updated to 1.5.0")
+    check(cols[-2:] == ["device", "ip"], "upgrade: ip column added after device (%s)" % cols)
+    check(sql(snap) == before and sql("SELECT COUNT(*) FROM piwigo_pulse_event WHERE ip IS NOT NULL") == [["0"]],
+          "upgrade: old rows intact, IP blank (%s)" % before)
+
+
 def live_trim(ctx, sid, token, img, cat):
     """Past the 2,000-row cap, a poll never drops rows Show older loaded, and every event stays reachable."""
     # Seeded out of id order by time, so trims and paging can't rely on the two agreeing.
@@ -705,6 +846,9 @@ def admin(p, token):
     live_poll(ctx, sid, token, top_img, top_id)
     live_trim(ctx, sid, token, top_img, top_id)
     live_album(ctx, sid, token, sub_id, sub_img)
+    live_ip(ctx, sid, token, top_img, top_id)
+    ip_tables(page, token, top_img, top_id)
+    geoip_setting(page, token, top_img, top_id)
 
     # Album filter: full-path labels; a parent includes its sub-albums.
     html, _ = admin_page(page, ADMIN + "-photos&days=1")
@@ -783,6 +927,7 @@ def admin(p, token):
 def main():
     token = sys.argv[1]
     link = BASE + "index.php?/v/" + token
+    upgrade()
     with sync_playwright() as p:
         a = desktop(p, link)
         b = iphone(p, link)

@@ -75,16 +75,16 @@
 {if $GP_TAB == 'live'}
 <p class="gp-note">Newest first, updated within a second while guests are active (every 5 seconds when quiet); opens with the latest {$GP_LIVE_PAGE} events, and Show older pages further back. Admin sessions are not tracked — open a share link in a private window to see yourself here.</p>
 <table class="table2 gp-table" id="gp-live">
-  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Album</th><th>Event</th><th>Photo</th><th>Value</th><th>Device</th></tr></thead>
+  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Album</th><th>Event</th><th>Photo</th><th>IP</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_EVENTS item=e}
     <tr data-id="{$e.id}">
       <td>{$e.occurred_at_display}</td>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$e.sid}">{$e.guest}</a></td>
       <td class="gp-album">{if $e.album_url}<a href="{$e.album_url|escape}">{$e.album_path|escape}</a>{/if}</td>
-      <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}</td>
+      <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}{if $e.value_label} <span class="gp-detail">{$e.value_label|escape}</span>{/if}</td>
       <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" data-preview="{$e.preview}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
-      <td>{$e.value}</td>
+      <td class="gp-ip">{$e.ip|escape|replace:':':':<wbr>'}{if $e.ip_location}<div class="gp-detail">{$e.ip_location|escape}</div>{/if}</td>
       <td>{$e.device}</td>
     </tr>
   {/foreach}
@@ -139,12 +139,14 @@
       album.appendChild(al);
     }
     var ev = cell(tr, e.event);
-    if (e.detail) {
+    [e.detail, e.value_label].forEach(function (text) {
+      if (!text) { return; }
+      ev.appendChild(document.createTextNode(' '));
       var s = document.createElement('span');
       s.className = 'gp-detail';
-      s.textContent = ' ' + e.detail;
+      s.textContent = text;
       ev.appendChild(s);
-    }
+    });
     var photo = cell(tr, null);
     photo.className = 'gp-photo';
     if (e.thumb) {
@@ -160,7 +162,22 @@
     } else if (e.category_name) {
       photo.textContent = e.category_name;
     }
-    cell(tr, e.value);
+    var ip = cell(tr, null);
+    ip.className = 'gp-ip';
+    // IPv6 may break after a colon; nothing else breaks an address.
+    (e.ip || '').split(':').forEach(function (part, i) {
+      if (i > 0) {
+        ip.appendChild(document.createTextNode(':'));
+        ip.appendChild(document.createElement('wbr'));
+      }
+      if (part) { ip.appendChild(document.createTextNode(part)); }
+    });
+    if (e.ip_location) {
+      var loc = document.createElement('div');
+      loc.className = 'gp-detail';
+      loc.textContent = e.ip_location;
+      ip.appendChild(loc);
+    }
     cell(tr, e.device);
     return tr;
   }
@@ -346,15 +363,15 @@
 {if !empty($GP_PHOTO.timeline)}
 <h4>Events</h4>
 <table class="table2 gp-table">
-  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Link</th><th>Event</th><th>Value</th><th>Device</th></tr></thead>
+  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Link</th><th>Event</th><th>IP</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_PHOTO.timeline item=e}
     <tr>
       <td>{$e.occurred_at_display}</td>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$e.sid}">{$e.guest}</a></td>
       <td>{$e.link_name|escape}</td>
-      <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}</td>
-      <td>{$e.value}{if $e.event == 'dwell'} s{elseif $e.event == 'zoom'}&times;{/if}</td>
+      <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}{if $e.value_label} <span class="gp-detail">{$e.value_label|escape}</span>{/if}</td>
+      <td class="gp-ip">{$e.ip|escape|replace:':':':<wbr>'}{if $e.ip_location}<div class="gp-detail">{$e.ip_location|escape}</div>{/if}</td>
       <td>{$e.device}</td>
     </tr>
   {/foreach}
@@ -373,15 +390,15 @@
 <p>No events for this guest.</p>
 {else}
 <table class="table2 gp-table">
-  <thead><tr><th>Time ({$GP_TZ})</th><th>Link</th><th>Event</th><th>Photo / album</th><th>Value</th><th>Device</th></tr></thead>
+  <thead><tr><th>Time ({$GP_TZ})</th><th>Link</th><th>Event</th><th>Photo / album</th><th>IP</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_TIMELINE item=e}
     <tr>
       <td>{$e.occurred_at_display}</td>
       <td>{$e.link_name|escape}</td>
-      <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}</td>
+      <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}{if $e.value_label} <span class="gp-detail">{$e.value_label|escape}</span>{/if}</td>
       <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" data-preview="{$e.preview}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
-      <td>{$e.value}{if $e.event == 'dwell'} s{elseif $e.event == 'zoom'}&times;{/if}</td>
+      <td class="gp-ip">{$e.ip|escape|replace:':':':<wbr>'}{if $e.ip_location}<div class="gp-detail">{$e.ip_location|escape}</div>{/if}</td>
       <td>{$e.device}</td>
     </tr>
   {/foreach}
@@ -465,6 +482,13 @@
     </label>
   </p>
   <p class="gp-note">Events are stored in UTC; only what you see is converted, with daylight saving applied.</p>
+  <p>
+    <label>GeoIP database
+      <input type="text" name="geoip_path" value="{$GP_GEOIP_PATH|escape}" size="60" placeholder="blank = no locations">
+    </label>
+  </p>
+  {if $GP_GEOIP_PROBLEM}<p class="gp-note gp-warning">{$GP_GEOIP_PROBLEM|escape}</p>{/if}
+  <p class="gp-note">A MaxMind GeoLite2 City (<code>.mmdb</code>) file as the server sees it, used to show each IP's city and country. Lookups are local; no address leaves the server. Leave blank to show addresses without a location.</p>
   <p><input type="submit" name="save" value="Save" class="buttonLike"></p>
 </form>
 <p class="gp-note">The event table holds {$GP_TABLE.rows} events{if $GP_TABLE.oldest}, the oldest from {$GP_TABLE.oldest} {$GP_TZ}{/if}, using {$GP_TABLE.size_mb} MB.</p>
