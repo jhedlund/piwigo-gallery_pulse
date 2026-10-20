@@ -4,6 +4,7 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 define('GALLERY_PULSE_RETENTION_DEFAULT', 730);
 define('GALLERY_PULSE_RETENTION_MIN', 30);
 define('GALLERY_PULSE_RETENTION_MAX', 3650);
+define('GALLERY_PULSE_TIMEZONE_DEFAULT', 'America/New_York');
 define('GALLERY_PULSE_MAX_BATCH', 50);
 // Beacon events may be backdated by up to MAX_AGE seconds (queued in the
 // browser), so the rate windows cover MAX_AGE plus one minute.
@@ -44,15 +45,92 @@ function gallery_pulse_retention_days()
   return $days;
 }
 
+/**
+ * Zone the admin shows times in, from the plugin settings.
+ */
+function gallery_pulse_timezone()
+{
+  global $conf;
+
+  static $zone = null;
+  if ($zone === null)
+  {
+    $name = isset($conf['gallery_pulse_timezone']) && in_array($conf['gallery_pulse_timezone'], DateTimeZone::listIdentifiers(), true)
+      ? $conf['gallery_pulse_timezone']
+      : GALLERY_PULSE_TIMEZONE_DEFAULT;
+    $zone = new DateTimeZone($name);
+  }
+  return $zone;
+}
+
+/**
+ * A stored timestamp, shown in the display zone. Events are stored in UTC
+ * (NOW() on a database server running in UTC); only display converts, so
+ * period windows and the prune never see a local time.
+ */
+function gallery_pulse_format_time($utc)
+{
+  if ($utc === null || $utc === '')
+  {
+    return null;
+  }
+  $t = new DateTime($utc, new DateTimeZone('UTC'));
+  return $t->setTimezone(gallery_pulse_timezone())->format('Y-m-d H:i:s');
+}
+
+/**
+ * Short label for the display zone in table headers ("New York"). A place
+ * rather than EST/EDT, which would be wrong for rows on the other side of a
+ * daylight-saving change.
+ */
+function gallery_pulse_timezone_label()
+{
+  $name = gallery_pulse_timezone()->getName();
+  $pos = strrpos($name, '/');
+  return str_replace('_', ' ', $pos === false ? $name : substr($name, $pos + 1));
+}
+
 function gallery_pulse_valid_sid($sid)
 {
   return is_string($sid) && preg_match('/^[a-f0-9]{32}$/', $sid);
 }
 
-function gallery_pulse_device()
+/**
+ * Device family from the User-Agent: iphone, ipad, android, windows, mac,
+ * linux or other. iPadOS reports itself as a Mac, so a Mac UA with a touch
+ * screen (the beacon's hint; display only) is an iPad. Rows from 1.0/1.1 hold
+ * phone/tablet/desktop instead.
+ *
+ * @param bool|null $touch beacon hint, null when unknown (server-side downloads)
+ */
+function gallery_pulse_device($touch = null)
 {
-  $device = get_device();
-  return $device == 'mobile' ? 'phone' : $device;
+  $ua = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+  if (preg_match('/iPhone|iPod/', $ua))
+  {
+    return 'iphone';
+  }
+  if (strpos($ua, 'iPad') !== false || (strpos($ua, 'Macintosh') !== false && $touch === true))
+  {
+    return 'ipad';
+  }
+  if (strpos($ua, 'Android') !== false)
+  {
+    return 'android';
+  }
+  if (strpos($ua, 'Windows') !== false)
+  {
+    return 'windows';
+  }
+  if (strpos($ua, 'Macintosh') !== false)
+  {
+    return 'mac';
+  }
+  if (strpos($ua, 'Linux') !== false && strpos($ua, 'CrOS') === false)
+  {
+    return 'linux';
+  }
+  return 'other';
 }
 
 /**
@@ -167,6 +245,66 @@ SELECT image_id, MIN(category_id) AS category_id
 }
 
 /**
+ * The album a beacon event says its page shows, if it can be trusted: under a
+ * share link, the c-token resolved within the link's albums (no token = the
+ * link's own album); otherwise a numeric id the visitor may see. Null if none.
+ */
+function gallery_pulse_viewed_category($ev, $scope, $token)
+{
+  static $cache = array();
+
+  $ctok = isset($ev['ctok']) && is_string($ev['ctok']) ? $ev['ctok'] : null;
+  $cat = isset($ev['cat']) && is_int($ev['cat']) && $ev['cat'] > 0 ? $ev['cat'] : null;
+  $key = ($scope ? $token : '') . '|' . $ctok . '|' . $cat;
+  if (!array_key_exists($key, $cache))
+  {
+    if ($scope)
+    {
+      $cache[$key] = gallery_pulse_scope_category($scope, $token, $ctok);
+    }
+    else
+    {
+      $cache[$key] = $cat !== null && gallery_pulse_visible_category($cat) ? $cat : null;
+    }
+  }
+  return $cache[$key];
+}
+
+/**
+ * Which of the given image => album pairs are real: the image is filed in
+ * that album.
+ *
+ * @param array $pairs list of array(image_id, category_id)
+ * @return array set keyed "image_id:category_id"
+ */
+function gallery_pulse_filed_pairs($pairs)
+{
+  if (empty($pairs))
+  {
+    return array();
+  }
+  $images = array();
+  $cats = array();
+  foreach ($pairs as $p)
+  {
+    $images[] = (int)$p[0];
+    $cats[] = (int)$p[1];
+  }
+  $rows = query2array('
+SELECT image_id, category_id
+  FROM ' . IMAGE_CATEGORY_TABLE . '
+  WHERE image_id IN (' . implode(',', array_unique($images)) . ')
+    AND category_id IN (' . implode(',', array_unique($cats)) . ')
+;');
+  $filed = array();
+  foreach ($rows as $r)
+  {
+    $filed[$r['image_id'] . ':' . $r['category_id']] = true;
+  }
+  return $filed;
+}
+
+/**
  * Insert already-validated rows. Every value is an int, a float, null, or a
  * string that passed a strict pattern; strings are escaped regardless.
  */
@@ -271,7 +409,7 @@ DELETE FROM ' . GALLERY_PULSE_TABLE . '
  * @param array $events decoded JSON from the beacon
  * @return array rows for gallery_pulse_insert()
  */
-function gallery_pulse_build_rows($sid, $token, $events)
+function gallery_pulse_build_rows($sid, $token, $events, $touch = null)
 {
   global $user;
 
@@ -289,9 +427,23 @@ function gallery_pulse_build_rows($sid, $token, $events)
   }
   $image_cats = gallery_pulse_image_categories($image_ids, $scope);
 
-  $device = gallery_pulse_device();
+  // Photo events are filed under the album the guest was looking at, when the
+  // photo really is in it; otherwise under the lowest album id it's filed in.
+  $viewed = array();
+  $pairs = array();
+  foreach ($events as $i => $ev)
+  {
+    $viewed[$i] = gallery_pulse_viewed_category($ev, $scope, $token);
+    if ($viewed[$i] !== null && isset($ev['img']) && is_numeric($ev['img']) && $ev['img'] > 0)
+    {
+      $pairs[] = array((int)$ev['img'], $viewed[$i]);
+    }
+  }
+  $filed = gallery_pulse_filed_pairs($pairs);
+
+  $device = gallery_pulse_device($touch);
   $rows = array();
-  foreach ($events as $ev)
+  foreach ($events as $i => $ev)
   {
     $event = isset($ev['e']) ? $ev['e'] : null;
     if (!is_string($event) || !isset($allowed[$event]))
@@ -314,21 +466,14 @@ function gallery_pulse_build_rows($sid, $token, $events)
       {
         continue; // unknown image, or not part of this share link
       }
-      $category_id = $image_cats[$image_id];
+      $category_id = isset($filed[$image_id . ':' . $viewed[$i]]) ? $viewed[$i] : $image_cats[$image_id];
     }
 
     // An album page_view names its album: by c-token under a share link (the
     // page never prints the id there), by numeric id otherwise.
     if ($event == 'page_view' && $image_id === null)
     {
-      if ($scope)
-      {
-        $category_id = gallery_pulse_scope_category($scope, $token, isset($ev['ctok']) ? $ev['ctok'] : null);
-      }
-      elseif (isset($ev['cat']) && is_int($ev['cat']) && $ev['cat'] > 0 && gallery_pulse_visible_category($ev['cat']))
-      {
-        $category_id = $ev['cat'];
-      }
+      $category_id = $viewed[$i];
     }
 
     if ($event != 'page_view' && $image_id === null)
@@ -420,7 +565,7 @@ function gallery_pulse_inject_beacon()
     'id' => 'gallery_pulse',
     'load' => 'footer',
     'path' => GALLERY_PULSE_PATH . 'js/beacon.js',
-    'version' => '1.0.0',
+    'version' => '1.2.0',
   ));
   $template->block_footer_script(
     array('require' => 'gallery_pulse'),
@@ -487,6 +632,48 @@ SELECT COUNT(*)
     $cats = gallery_pulse_image_categories(array($image_id), false);
   }
 
+  // The download button sits on the album page, so the Referer names the album
+  // being viewed. It's client input: same checks as a beacon event's album.
+  $category_id = isset($cats[$image_id]) ? $cats[$image_id] : null;
+  $referer = isset($_SERVER['HTTP_REFERER']) && is_string($_SERVER['HTTP_REFERER']) ? $_SERVER['HTTP_REFERER'] : '';
+  $context = array();
+  if (preg_match('~/(c-[a-f0-9]{8})(?:[/?&#]|$)~', $referer, $m))
+  {
+    $context['ctok'] = $m[1];
+  }
+  if (preg_match('~/category/(\d+)~', $referer, $m))
+  {
+    $context['cat'] = (int)$m[1];
+  }
+  if ($category_id !== null && !empty($context))
+  {
+    $viewed = gallery_pulse_viewed_category($context, $scope, $token);
+    $filed = $viewed === null ? array() : gallery_pulse_filed_pairs(array(array($image_id, $viewed)));
+    if (isset($filed[$image_id . ':' . $viewed]))
+    {
+      $category_id = $viewed;
+    }
+  }
+
+  // Downloads carry no touch hint, so an iPad's Mac User-Agent would read as
+  // a Mac; take the beacon's answer for this browser when it has one.
+  $device = gallery_pulse_device();
+  if ($device == 'mac' && $sid !== GALLERY_PULSE_NO_SID)
+  {
+    list($last) = pwg_db_fetch_row(pwg_query('
+SELECT device
+  FROM ' . GALLERY_PULSE_TABLE . '
+  WHERE sid = \'' . pwg_db_real_escape_string($sid) . '\'
+    AND event <> \'download\'
+  ORDER BY id DESC
+  LIMIT 1
+;'));
+    if ($last === 'ipad')
+    {
+      $device = 'ipad';
+    }
+  }
+
   global $user;
   gallery_pulse_insert(array(array(
     'age' => 0,
@@ -494,10 +681,10 @@ SELECT COUNT(*)
     'user_id' => isset($user['id']) ? (int)$user['id'] : null,
     'share_token' => $scope ? $token : null,
     'image_id' => $image_id,
-    'category_id' => isset($cats[$image_id]) ? $cats[$image_id] : null,
+    'category_id' => $category_id,
     'event' => 'download',
     'value' => null,
     'detail' => $_GET['part'] == 'f' ? 'format' : null,
-    'device' => gallery_pulse_device(),
+    'device' => $device,
   )));
 }

@@ -200,6 +200,8 @@ SELECT id, name, file, path, representative_ext, width, height, rotation
     $img = !empty($r['image_id']) && isset($images[$r['image_id']]) ? $images[$r['image_id']] : null;
     $r['image_name'] = $img ? (empty($img['name']) ? $img['file'] : $img['name']) : null;
     $r['thumb'] = $img ? DerivativeImage::thumb_url($img) : null;
+    // Sharper image for the hover popup; the browser fetches it on first hover only.
+    $r['preview'] = $img ? DerivativeImage::url(IMG_SMALL, $img) : null;
     $r['image_admin_url'] = $img ? get_root_url() . 'admin.php?page=photo-' . $img['id'] : null;
     $r['detail_url'] = $img ? GALLERY_PULSE_ADMIN . '-photo&image_id=' . $img['id'] : null;
   }
@@ -240,6 +242,8 @@ function gallery_pulse_decorate_events(&$rows)
     $r['guest'] = substr($r['sid'], 0, 8);
     $r['link_name'] = $r['share_token'] !== null && isset($links[$r['share_token']]) ? $links[$r['share_token']] : null;
     $r['value'] = $r['value'] === null ? null : round((float)$r['value'], 2);
+    // occurred_at stays raw UTC: the Live poll sorts on it.
+    $r['occurred_at_display'] = gallery_pulse_format_time($r['occurred_at']);
   }
   unset($r);
 }
@@ -348,13 +352,42 @@ SELECT e.image_id,
   return $rows;
 }
 
-function gallery_pulse_visitors($days, $token)
+/**
+ * user_id => username for registered users; the shared guest account is left out.
+ */
+function gallery_pulse_usernames($user_ids)
+{
+  global $conf;
+
+  $ids = array();
+  foreach ($user_ids as $id)
+  {
+    if ($id !== null && (int)$id > 0 && (int)$id != $conf['guest_id'])
+    {
+      $ids[] = (int)$id;
+    }
+  }
+  if (empty($ids))
+  {
+    return array();
+  }
+  return query2array('
+SELECT ' . $conf['user_fields']['id'] . ' AS id, ' . $conf['user_fields']['username'] . ' AS username
+  FROM ' . USERS_TABLE . '
+  WHERE ' . $conf['user_fields']['id'] . ' IN (' . implode(',', array_unique($ids)) . ')
+;', 'id', 'username');
+}
+
+/**
+ * @param int[]|null $cat_ids only events filed under these albums
+ */
+function gallery_pulse_visitors($days, $cat_ids)
 {
   $query = '
 SELECT e.sid,
     MIN(e.occurred_at) AS first_seen,
     MAX(e.occurred_at) AS last_seen,
-    MAX(e.share_token) AS share_token,
+    MAX(e.user_id) AS user_id,
     MAX(e.device) AS device,
     COUNT(DISTINCT e.image_id) AS photos,
     SUM(e.event = \'zoom\') AS zooms,
@@ -362,28 +395,86 @@ SELECT e.sid,
     SUM(e.event = \'download\') AS downloads,
     COALESCE(SUM(CASE WHEN e.event = \'dwell\' THEN e.value END), 0) AS dwell_total
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, $token) . '
+  WHERE ' . gallery_pulse_where($days, null, $cat_ids) . '
   GROUP BY e.sid
   ORDER BY last_seen DESC
   LIMIT 200
 ;';
   $rows = query2array($query);
-  $links = gallery_pulse_link_names();
+  if (empty($rows))
+  {
+    return $rows;
+  }
+
+  // Albums each visitor reached, most active first.
+  $sids = array_map(function ($r) { return '\'' . pwg_db_real_escape_string($r['sid']) . '\''; }, $rows);
+  $visited = array();
+  foreach (query2array('
+SELECT e.sid, e.category_id, COUNT(*) AS n
+  FROM ' . GALLERY_PULSE_TABLE . ' e
+  WHERE ' . gallery_pulse_where($days, null, $cat_ids) . '
+    AND e.sid IN (' . implode(',', $sids) . ')
+    AND e.category_id IS NOT NULL
+  GROUP BY e.sid, e.category_id
+  ORDER BY n DESC, e.category_id
+;') as $v)
+  {
+    $visited[$v['sid']][] = (int)$v['category_id'];
+  }
+  $all = array();
+  foreach ($visited as $cats)
+  {
+    $all = array_merge($all, $cats);
+  }
+  $paths = gallery_pulse_category_paths($all);
+  $users = gallery_pulse_usernames(array_map(function ($r) { return $r['user_id']; }, $rows));
+
   foreach ($rows as &$r)
   {
     $r['guest'] = $r['sid'] === GALLERY_PULSE_NO_SID ? 'no beacon' : substr($r['sid'], 0, 8);
-    $r['link_name'] = $r['share_token'] !== null && isset($links[$r['share_token']]) ? $links[$r['share_token']] : null;
+    $r['username'] = $r['user_id'] !== null && isset($users[$r['user_id']]) ? $users[$r['user_id']] : null;
+    $names = array();
+    foreach (isset($visited[$r['sid']]) ? $visited[$r['sid']] : array() as $c)
+    {
+      if (isset($paths[$c]))
+      {
+        $names[] = $paths[$c];
+      }
+    }
+    $r['album_first'] = empty($names) ? null : $names[0];
+    $r['albums_more'] = max(0, count($names) - 1);
+    $r['albums_all'] = implode("\n", $names);
     $r['dwell_total'] = round((float)$r['dwell_total']);
+    $r['first_seen_display'] = gallery_pulse_format_time($r['first_seen']);
+    $r['last_seen_display'] = gallery_pulse_format_time($r['last_seen']);
   }
   unset($r);
   return $rows;
 }
 
-function gallery_pulse_link_stats($days)
+/**
+ * Username behind a browser, if any of its events came from a registered user.
+ */
+function gallery_pulse_visitor_username($sid)
+{
+  list($user_id) = pwg_db_fetch_row(pwg_query('
+SELECT MAX(user_id) FROM ' . GALLERY_PULSE_TABLE . ' WHERE sid = \'' . pwg_db_real_escape_string($sid) . '\'
+;'));
+  $users = gallery_pulse_usernames(array($user_id));
+  return $user_id !== null && isset($users[$user_id]) ? $users[$user_id] : null;
+}
+
+/**
+ * One row per album events were filed under (the album the guest was looking
+ * at, for events since 1.2), with the routes that reached it: each share link,
+ * or "direct" for public pages and logged-in users.
+ */
+function gallery_pulse_album_stats($days)
 {
   $query = '
-SELECT e.share_token,
+SELECT e.category_id,
     ' . gallery_pulse_sql_guests() . ' AS guests,
+    SUM(e.event = \'page_view\' AND e.detail = \'album\') AS album_views,
     ' . gallery_pulse_sql_views() . ' AS views,
     SUM(e.event = \'page_view\' AND e.detail = \'photo\') AS page_views,
     SUM(e.event = \'zoom\') AS zooms,
@@ -392,16 +483,35 @@ SELECT e.share_token,
     MAX(e.occurred_at) AS last_seen
   FROM ' . GALLERY_PULSE_TABLE . ' e
   WHERE ' . gallery_pulse_where($days, null) . '
-  GROUP BY e.share_token
+  GROUP BY e.category_id
   ORDER BY last_seen DESC
 ;';
   $rows = query2array($query);
-  $links = gallery_pulse_links();
+
+  $routes = array();
+  foreach (query2array('
+SELECT e.category_id, e.share_token, COUNT(*) AS n
+  FROM ' . GALLERY_PULSE_TABLE . ' e
+  WHERE ' . gallery_pulse_where($days, null) . '
+  GROUP BY e.category_id, e.share_token
+  ORDER BY n DESC
+;') as $route)
+  {
+    $routes[(string)$route['category_id']][] = $route['share_token'];
+  }
+
+  $paths = gallery_pulse_category_paths(array_filter(array_map(function ($r) { return $r['category_id']; }, $rows)));
+  $links = gallery_pulse_link_names();
   foreach ($rows as &$r)
   {
-    $link = $r['share_token'] !== null && isset($links[$r['share_token']]) ? $links[$r['share_token']] : null;
-    $r['link_name'] = $r['share_token'] === null ? null : ($link ? $link['name'] : $r['share_token']);
-    $r['category_id'] = $link ? $link['category_id'] : null;
+    $r['album_name'] = $r['category_id'] !== null && isset($paths[$r['category_id']]) ? $paths[$r['category_id']] : null;
+    $via = array();
+    foreach (isset($routes[(string)$r['category_id']]) ? $routes[(string)$r['category_id']] : array() as $token)
+    {
+      $via[] = $token === null ? 'direct' : 'link: ' . (isset($links[$token]) ? $links[$token] : $token);
+    }
+    $r['via'] = implode(', ', $via);
+    $r['last_seen_display'] = gallery_pulse_format_time($r['last_seen']);
   }
   unset($r);
   return $rows;
@@ -450,6 +560,7 @@ SELECT e.sid,
     $g['link_name'] = $g['share_token'] !== null && isset($links[$g['share_token']]) ? $links[$g['share_token']] : null;
     $g['dwell_total'] = round((float)$g['dwell_total']);
     $g['max_zoom'] = $g['max_zoom'] === null ? null : round((float)$g['max_zoom'], 1);
+    $g['last_seen_display'] = gallery_pulse_format_time($g['last_seen']);
   }
   unset($g);
 
@@ -502,7 +613,7 @@ SELECT data_length + index_length
 ;'));
   return array(
     'rows' => (int)$count,
-    'oldest' => $oldest,
+    'oldest' => gallery_pulse_format_time($oldest),
     'size_mb' => round((int)$bytes / 1048576, 1),
   );
 }

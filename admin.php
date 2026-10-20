@@ -10,23 +10,38 @@ $tabs = array(
   'live' => 'Live',
   'photos' => 'Photos',
   'visitors' => 'Visitors',
-  'links' => 'Links',
+  'albums' => 'Albums',
   'settings' => 'Settings',
 );
+$tab = isset($_GET['tab']) && is_string($_GET['tab']) ? $_GET['tab'] : 'live';
+// Links became Albums in 1.2; keep old bookmarks working.
+if ($tab == 'links')
+{
+  $tab = 'albums';
+}
 // One photo's detail view lives under the Photos tab.
-$tab = isset($_GET['tab']) && is_string($_GET['tab']) && (isset($tabs[$_GET['tab']]) || $_GET['tab'] == 'photo') ? $_GET['tab'] : 'live';
+if (!isset($tabs[$tab]) && $tab != 'photo')
+{
+  $tab = 'live';
+}
 
 if ($tab == 'settings' && isset($_POST['save']))
 {
   check_pwg_token();
   $retention = isset($_POST['retention_days']) ? (int)$_POST['retention_days'] : 0;
+  $timezone = isset($_POST['timezone']) && is_string($_POST['timezone']) ? $_POST['timezone'] : '';
   if ($retention < GALLERY_PULSE_RETENTION_MIN || $retention > GALLERY_PULSE_RETENTION_MAX)
   {
     $page['errors'][] = 'Retention must be between ' . GALLERY_PULSE_RETENTION_MIN . ' and ' . GALLERY_PULSE_RETENTION_MAX . ' days.';
   }
+  elseif (!in_array($timezone, DateTimeZone::listIdentifiers(), true))
+  {
+    $page['errors'][] = 'Unknown time zone.';
+  }
   else
   {
     conf_update_param('gallery_pulse_retention_days', $retention, true);
+    conf_update_param('gallery_pulse_timezone', $timezone, true);
     $page['infos'][] = 'Settings saved.';
   }
 }
@@ -49,14 +64,16 @@ if ($retention > 365)
 $periods[$retention] = 'All (' . $retention . ' days)';
 $days = isset($_GET['days']) && isset($periods[(int)$_GET['days']]) ? (int)$_GET['days'] : ($tab == 'photo' ? $retention : 30);
 
-$token = null;
-if (isset($_GET['link']) && is_string($_GET['link']) && preg_match('/^[A-Za-z0-9]{8,64}$/', $_GET['link']))
+// Album filter (Photos, Visitors): an album includes its sub-albums.
+$albums = array();
+$cat = null;
+$cat_ids = null;
+if ($tab == 'photos' || $tab == 'visitors')
 {
-  $token = $_GET['link'];
+  $albums = gallery_pulse_album_options();
+  $cat = isset($_GET['cat']) && isset($albums[(int)$_GET['cat']]) ? (int)$_GET['cat'] : null;
+  $cat_ids = $cat === null ? null : array_merge(array($cat), array_map('intval', get_subcat_ids(array($cat))));
 }
-
-$link_names = gallery_pulse_link_names();
-natcasesort($link_names);
 
 $template->assign(array(
   'GP_TAB' => $tab,
@@ -65,9 +82,10 @@ $template->assign(array(
   'GP_PATH' => GALLERY_PULSE_PATH,
   'GP_PERIODS' => $periods,
   'GP_DAYS' => $days,
-  'GP_LINKS' => $link_names,
-  'GP_LINK' => $token,
+  'GP_ALBUMS' => $albums,
+  'GP_CAT' => $cat,
   'GP_RETENTION' => $retention,
+  'GP_TZ' => gallery_pulse_timezone_label(),
 ));
 
 switch ($tab)
@@ -85,13 +103,8 @@ switch ($tab)
     break;
 
   case 'photos':
-    $albums = gallery_pulse_album_options();
-    $cat = isset($_GET['cat']) && isset($albums[(int)$_GET['cat']]) ? (int)$_GET['cat'] : null;
-    $cat_ids = $cat === null ? null : array_merge(array($cat), array_map('intval', get_subcat_ids(array($cat))));
     $sort = isset($_GET['sort']) && is_string($_GET['sort']) && array_key_exists($_GET['sort'], gallery_pulse_photo_sorts()) ? $_GET['sort'] : 'views';
     $template->assign(array(
-      'GP_ALBUMS' => $albums,
-      'GP_CAT' => $cat,
       'GP_SORT' => $sort,
       'GP_PHOTOS' => gallery_pulse_photo_stats($days, $cat_ids, $sort),
     ));
@@ -110,17 +123,18 @@ switch ($tab)
     {
       $template->assign(array(
         'GP_SID' => $_GET['sid'],
+        'GP_USERNAME' => gallery_pulse_visitor_username($_GET['sid']),
         'GP_TIMELINE' => gallery_pulse_visitor_timeline($_GET['sid']),
       ));
     }
     else
     {
-      $template->assign('GP_VISITORS', gallery_pulse_visitors($days, $token));
+      $template->assign('GP_VISITORS', gallery_pulse_visitors($days, $cat_ids));
     }
     break;
 
-  case 'links':
-    $template->assign('GP_LINK_STATS', gallery_pulse_link_stats($days));
+  case 'albums':
+    $template->assign('GP_ALBUM_STATS', gallery_pulse_album_stats($days));
     break;
 
   case 'settings':
@@ -128,6 +142,8 @@ switch ($tab)
       'GP_TOKEN' => get_pwg_token(),
       'GP_RETENTION_MIN' => GALLERY_PULSE_RETENTION_MIN,
       'GP_RETENTION_MAX' => GALLERY_PULSE_RETENTION_MAX,
+      'GP_TIMEZONES' => DateTimeZone::listIdentifiers(),
+      'GP_TIMEZONE' => gallery_pulse_timezone()->getName(),
       'GP_TABLE' => gallery_pulse_table_info(),
     ));
     break;
