@@ -45,7 +45,10 @@ function gallery_pulse_ws_live($params, &$service)
 {
   include_once(GALLERY_PULSE_PATH . 'include/stats.inc.php');
 
+  $before_id = (int)$params['before_id'];
   return array(
-    'events' => gallery_pulse_recent_events((int)$params['since_id'], 100),
+    'events' => $before_id > 0
+      ? gallery_pulse_recent_events(0, GALLERY_PULSE_LIVE_PAGE, $before_id)
+      : gallery_pulse_recent_events((int)$params['since_id'], GALLERY_PULSE_LIVE_POLL, 0, true),
   );
 }

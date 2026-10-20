@@ -241,6 +241,210 @@ def bad_input(link):
     sql("DELETE FROM piwigo_pulse_event WHERE id > %d" % since)
 
 
+PHP_ERRORS = ("Warning:", "Notice:", "Deprecated:", "Fatal error", "Uncaught")
+ADMIN = BASE + "admin.php?page=plugin-gallery_pulse"
+
+
+def admin_page(page, url):
+    page.goto(url)
+    html = page.content()
+    return html, not any(e in html for e in PHP_ERRORS)
+
+
+LIVE_PROBE = """
+window.__polls = []; window.__inflight = 0; window.__maxInflight = 0; window.__delay = 0;
+window.__hidden = false;
+Object.defineProperty(document, 'hidden', { get: () => window.__hidden });
+const realFetch = window.fetch;
+window.fetch = function (u, o) {
+  if (String(u).indexOf('since_id') < 0) { return realFetch(u, o); }
+  window.__polls.push(performance.now());
+  window.__inflight++;
+  window.__maxInflight = Math.max(window.__maxInflight, window.__inflight);
+  return new Promise(r => setTimeout(r, window.__delay))
+    .then(() => realFetch(u, o))
+    .finally(() => { window.__inflight--; });
+};
+window.__setHidden = h => { window.__hidden = h; document.dispatchEvent(new Event('visibilitychange')); };
+"""
+
+
+def live_poll(ctx, sid, token, img, cat):
+    """Adaptive Live poll: 1 s while active, 5 s when quiet, paused while hidden, never overlapping."""
+    page = ctx.new_page()
+    page.add_init_script(LIVE_PROBE)
+    page.goto(ADMIN + "-live")
+    page.wait_for_timeout(500)
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
+        "VALUES (NOW(), '%s', '%s', %s, %s, 'fullscreen')" % (sid, token, img, cat))
+    new_id = sql("SELECT MAX(id) FROM piwigo_pulse_event")[0][0]
+    t0 = time.time()
+    page.wait_for_selector("#gp-live tr[data-id='%s']" % new_id, timeout=5000)
+    check(time.time() - t0 < 2.5, "live poll: new event shown within ~1 s (%.1fs)" % (time.time() - t0))
+
+    page.wait_for_timeout(10000)
+    polls = page.evaluate("window.__polls")
+    gaps = [b - a for a, b in zip(polls, polls[1:])]
+    check(gaps[0] < 1500 and gaps[-1] > 4500, "live poll: 1 s cadence backs off to 5 s when quiet (%s)"
+          % [round(g / 1000, 1) for g in gaps])
+
+    page.evaluate("window.__setHidden(true)")
+    n = page.evaluate("window.__polls.length")
+    page.wait_for_timeout(7000)
+    check(page.evaluate("window.__polls.length") == n, "live poll: stops while the tab is hidden")
+    page.evaluate("window.__setHidden(false)")
+    page.wait_for_timeout(300)
+    check(page.evaluate("window.__polls.length") == n + 1, "live poll: polls immediately when shown again")
+    page.wait_for_timeout(1500)
+    check(page.evaluate("window.__polls.length") >= n + 2, "live poll: resumes at 1 s after becoming visible")
+
+    page.evaluate("window.__delay = 2500")
+    page.wait_for_timeout(1200)
+    page.evaluate("window.__setHidden(false); window.__setHidden(false)")
+    page.wait_for_timeout(4000)
+    check(page.evaluate("window.__maxInflight") == 1, "live poll: never two requests in flight")
+    page.close()
+
+
+def live_trim(ctx, sid, token, img, cat):
+    """Past the 2,000-row cap, a poll never drops rows Show older loaded, and every event stays reachable."""
+    # Seeded out of id order by time, so trims and paging can't rely on the two agreeing.
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
+        "SELECT NOW() - INTERVAL 3000 + (seq %% 7) * 50 - seq SECOND, '%s', '%s', %s, %s, 'dwell' FROM seq_0_to_1999"
+        % (sid, token, img, cat))
+    total = int(sql("SELECT COUNT(*) FROM piwigo_pulse_event")[0][0])
+    page = ctx.new_page()
+    page.goto(ADMIN + "-live")
+    for _ in range(10):
+        if not page.is_visible("#gp-older") or page.locator("#gp-live tbody tr").count() >= 2400:
+            break
+        page.click("#gp-older")
+        page.wait_for_function("!document.getElementById('gp-older').disabled")
+    loaded = page.locator("#gp-live tbody tr").count()
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
+        "VALUES (NOW(), '%s', '%s', %s, %s, 'fullscreen')" % (sid, token, img, cat))
+    new_id = sql("SELECT MAX(id) FROM piwigo_pulse_event")[0][0]
+    page.wait_for_selector("#gp-live tr[data-id='%s']" % new_id, timeout=5000)
+    page.wait_for_timeout(1500)
+    after = page.locator("#gp-live tbody tr").count()
+    check(loaded > 2000 and after == loaded, "live trim: poll keeps rows Show older loaded (%d -> %d)" % (loaded, after))
+    for _ in range(20):
+        if not page.is_visible("#gp-older"):
+            break
+        page.click("#gp-older")
+        page.wait_for_function("!document.getElementById('gp-older').disabled")
+    ids = page.eval_on_selector_all("#gp-live tbody tr", "trs => trs.map(t => t.dataset.id)")
+    check(len(ids) == len(set(ids)) == total + 1, "live trim: every event reachable once by paging (%d unique of %d)"
+          % (len(set(ids)), total + 1))
+    page.close()
+
+
+def admin(p, token):
+    """Admin tabs: album filter, full paths, photo detail, hover, Live paging, retention setting."""
+    since = max_id()
+    top_id = sql("SELECT category_id FROM piwigo_unlisted_albums WHERE random_key = '%s'" % token)[0][0]
+    sub_id = sql("SELECT id FROM piwigo_categories WHERE name = 'Second Half'")[0][0]
+    top_img = sql("SELECT MIN(image_id) FROM piwigo_image_category WHERE category_id = %s" % top_id)[0][0]
+    sub_img = sql("SELECT MIN(image_id) FROM piwigo_image_category WHERE category_id = %s" % sub_id)[0][0]
+    sid = "c" * 32
+    # 600 seeded events so Live has more than one page; one zoom per album.
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
+        "SELECT NOW() - INTERVAL seq + 10 SECOND, '%s', '%s', %s, %s, 'lightbox_view' FROM seq_0_to_597"
+        % (sid, token, top_img, top_id))
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event, value) VALUES "
+        "(NOW(), '%s', '%s', %s, %s, 'zoom', 2.5), (NOW(), '%s', '%s', %s, %s, 'zoom', 3.0)"
+        % (sid, token, top_img, top_id, sid, token, sub_img, sub_id))
+
+    browser = p.chromium.launch()
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900})
+    ctx.request.post(BASE + "ws.php?format=json", form={"method": "pwg.session.login", "username": "admin", "password": "adminpass"})
+    page = ctx.new_page()
+
+    for tab in ("live", "photos", "visitors", "links", "settings"):
+        html, clean = admin_page(page, ADMIN + "-" + tab)
+        check(clean and "gp-wrap" in html, "admin: %s tab renders without PHP errors" % tab)
+    pad = page.eval_on_selector(".gp-wrap", "e => parseFloat(getComputedStyle(e).paddingLeft)")
+    check(pad >= 15, "admin: content padded off the left edge (%spx)" % pad)
+
+    # Live: first page is 500, Show older pages back to everything.
+    admin_page(page, ADMIN + "-live")
+    check(page.locator("#gp-live tbody tr").count() == 500, "live: opens with 500 rows")
+    page.click("#gp-older")
+    page.wait_for_function("document.querySelectorAll('#gp-live tbody tr').length > 500")
+    total = int(sql("SELECT COUNT(*) FROM piwigo_pulse_event")[0][0])
+    rows = page.locator("#gp-live tbody tr").count()
+    check(rows == min(total, 1000), "live: Show older adds the next page (%d of %d)" % (rows, total))
+    ids = page.eval_on_selector_all("#gp-live tbody tr", "trs => trs.map(t => t.dataset.id)")
+    check(len(ids) == len(set(ids)), "live: no duplicate rows after paging")
+
+    live_poll(ctx, sid, token, top_img, top_id)
+    live_trim(ctx, sid, token, top_img, top_id)
+
+    # Album filter: full-path labels; a parent includes its sub-albums.
+    html, _ = admin_page(page, ADMIN + "-photos&days=1")
+    check("Test Match / Second Half" in html, "photos: album filter shows full paths")
+    check(page.locator("select[name=link]").count() == 0, "photos: share-link filter replaced by album filter")
+    _, clean = admin_page(page, ADMIN + "-photos&days=1&cat=%s" % sub_id)
+    photo_ids = page.eval_on_selector_all("td.gp-photo a", "as => as.map(a => new URL(a.href).searchParams.get('image_id'))")
+    check(clean and photo_ids == [sub_img], "photos: sub-album filter shows only its photos (%s)" % photo_ids)
+    admin_page(page, ADMIN + "-photos&days=1&cat=%s" % top_id)
+    photo_ids = page.eval_on_selector_all("td.gp-photo a", "as => as.map(a => new URL(a.href).searchParams.get('image_id'))")
+    check(top_img in photo_ids and sub_img in photo_ids, "photos: parent album includes sub-album photos (%s)" % photo_ids)
+    _, clean = admin_page(page, ADMIN + "-photos&days=1&cat=99999")
+    check(clean and page.locator("select[name=cat] option[selected]").count() == 0, "photos: unknown album id ignored")
+
+    # Hover zoom enlarges without changing row height.
+    thumb = page.locator("td.gp-photo img").first
+    h0 = page.locator("table.gp-table tbody tr").first.bounding_box()["height"]
+    thumb.hover()
+    page.wait_for_timeout(300)
+    transform = thumb.evaluate("e => getComputedStyle(e).transform")
+    h1 = page.locator("table.gp-table tbody tr").first.bounding_box()["height"]
+    check(transform not in ("none", "") and h0 == h1, "photos: hover enlarges thumb without reflow (%s)" % transform)
+
+    # Detail view, and the round trip to Piwigo's own photo page.
+    page.locator("td.gp-photo a[href*='image_id=%s']" % sub_img).first.click()
+    page.wait_for_load_state()
+    html = page.content()
+    check(not any(e in html for e in PHP_ERRORS) and "Piwigo History" in html and "Guests" in html,
+          "detail: renders pulse totals, core History block and guests")
+    check(sid[:8] in html and ("3&times;" in html or "3×" in html), "detail: shows this photo's guest and max zoom")
+    page.click("text=Edit in Piwigo")
+    page.wait_for_load_state()
+    check(("page=photo-%s" % sub_img) in page.url, "detail: links through to the core photo page (%s)" % page.url)
+    _, clean = admin_page(page, ADMIN + "-photo&image_id=999999")
+    check(clean and "Photo not found" in page.content(), "detail: unknown photo handled")
+
+    # Links tab: full path, and its Photos link uses the album filter.
+    html, _ = admin_page(page, ADMIN + "-links&days=1")
+    check(page.locator("a[href*='cat=%s']" % top_id).count() >= 1, "links: Photos link filters by the link's album")
+
+    # Retention: default 730, validated, and the prune honours it.
+    admin_page(page, ADMIN + "-settings")
+    check(page.input_value("input[name=retention_days]") == "730", "settings: retention defaults to 730 days")
+    page.fill("input[name=retention_days]", "5")
+    page.evaluate("document.querySelector('input[name=retention_days]').removeAttribute('min')")
+    page.click("input[name=save]")
+    check("between 30 and 3650" in page.content(), "settings: out-of-range retention rejected")
+    page.fill("input[name=retention_days]", "400")
+    page.click("input[name=save]")
+    check(sql("SELECT value FROM piwigo_config WHERE param = 'gallery_pulse_retention_days'") == [["400"]],
+          "settings: retention saved")
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, event) VALUES "
+        "(NOW() - INTERVAL 401 DAY, '%s', %s, 'zoom'), (NOW() - INTERVAL 399 DAY, '%s', %s, 'fullscreen')"
+        % ("d" * 32, top_img, "d" * 32, top_img))
+    sql("DELETE FROM piwigo_config WHERE param = 'gallery_pulse_last_prune'")
+    data = ("method=galleryPulse.track&sid=" + "b" * 32 + "&token=" + token + "&events=" +
+            urllib.request.quote(json.dumps([{"e": "fullscreen", "img": int(top_img)}]))).encode()
+    urllib.request.urlopen(BASE + "ws.php?format=json", data).read()
+    kept = [r[0] for r in sql("SELECT event FROM piwigo_pulse_event WHERE sid = '%s'" % ("d" * 32))]
+    check(kept == ["fullscreen"], "prune: 401-day row deleted, 399-day row kept at 400-day retention (%s)" % kept)
+
+    browser.close()
+    sql("DELETE FROM piwigo_config WHERE param IN ('gallery_pulse_retention_days', 'gallery_pulse_last_prune')")
+    sql("DELETE FROM piwigo_pulse_event WHERE id > %d OR sid = '%s'" % (since, "d" * 32))
+
+
 def main():
     token = sys.argv[1]
     link = BASE + "index.php?/v/" + token
@@ -250,6 +454,7 @@ def main():
         check(a and b and a != b, "two devices = two guests under one link")
         autoplay(p, link)
         page_context(p, link, token)
+        admin(p, token)
     downloads(link)
     no_js(link)
     bad_input(link)

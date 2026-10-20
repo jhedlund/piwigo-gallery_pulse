@@ -11,8 +11,25 @@ $tabs = array(
   'photos' => 'Photos',
   'visitors' => 'Visitors',
   'links' => 'Links',
+  'settings' => 'Settings',
 );
-$tab = isset($_GET['tab']) && isset($tabs[$_GET['tab']]) ? $_GET['tab'] : 'live';
+// One photo's detail view lives under the Photos tab.
+$tab = isset($_GET['tab']) && is_string($_GET['tab']) && (isset($tabs[$_GET['tab']]) || $_GET['tab'] == 'photo') ? $_GET['tab'] : 'live';
+
+if ($tab == 'settings' && isset($_POST['save']))
+{
+  check_pwg_token();
+  $retention = isset($_POST['retention_days']) ? (int)$_POST['retention_days'] : 0;
+  if ($retention < GALLERY_PULSE_RETENTION_MIN || $retention > GALLERY_PULSE_RETENTION_MAX)
+  {
+    $page['errors'][] = 'Retention must be between ' . GALLERY_PULSE_RETENTION_MIN . ' and ' . GALLERY_PULSE_RETENTION_MAX . ' days.';
+  }
+  else
+  {
+    conf_update_param('gallery_pulse_retention_days', $retention, true);
+    $page['infos'][] = 'Settings saved.';
+  }
+}
 
 $tabsheet = new tabsheet();
 $tabsheet->set_id('gallery_pulse');
@@ -20,20 +37,26 @@ foreach ($tabs as $code => $label)
 {
   $tabsheet->add($code, $label, GALLERY_PULSE_ADMIN . '-' . $code);
 }
-$tabsheet->select($tab);
+$tabsheet->select($tab == 'photo' ? 'photos' : $tab);
 $tabsheet->assign();
 
-$periods = array(1 => 'Last 24 hours', 7 => 'Last 7 days', 30 => 'Last 30 days', GALLERY_PULSE_RETENTION_DAYS => 'Last ' . GALLERY_PULSE_RETENTION_DAYS . ' days');
-$days = isset($_GET['days']) && isset($periods[(int)$_GET['days']]) ? (int)$_GET['days'] : 30;
+$retention = gallery_pulse_retention_days();
+$periods = array(1 => 'Last 24 hours', 7 => 'Last 7 days', 30 => 'Last 30 days');
+if ($retention > 365)
+{
+  $periods[365] = 'Last 365 days';
+}
+$periods[$retention] = 'All (' . $retention . ' days)';
+$days = isset($_GET['days']) && isset($periods[(int)$_GET['days']]) ? (int)$_GET['days'] : ($tab == 'photo' ? $retention : 30);
 
 $token = null;
-if (isset($_GET['link']) && preg_match('/^[A-Za-z0-9]{8,64}$/', $_GET['link']))
+if (isset($_GET['link']) && is_string($_GET['link']) && preg_match('/^[A-Za-z0-9]{8,64}$/', $_GET['link']))
 {
   $token = $_GET['link'];
 }
 
 $link_names = gallery_pulse_link_names();
-asort($link_names);
+natcasesort($link_names);
 
 $template->assign(array(
   'GP_TAB' => $tab,
@@ -44,24 +67,41 @@ $template->assign(array(
   'GP_DAYS' => $days,
   'GP_LINKS' => $link_names,
   'GP_LINK' => $token,
-  'GP_RETENTION' => GALLERY_PULSE_RETENTION_DAYS,
+  'GP_RETENTION' => $retention,
 ));
 
 switch ($tab)
 {
   case 'live':
-    $events = gallery_pulse_recent_events(0, 100);
+    $events = gallery_pulse_recent_events(0, GALLERY_PULSE_LIVE_PAGE);
     $template->assign(array(
       'GP_EVENTS' => $events,
+      'GP_LIVE_PAGE' => GALLERY_PULSE_LIVE_PAGE,
+      'GP_LIVE_MORE' => count($events) >= GALLERY_PULSE_LIVE_PAGE,
+      'GP_LIVE_POLL' => GALLERY_PULSE_LIVE_POLL,
+      'GP_LIVE_MAX_ROWS' => GALLERY_PULSE_LIVE_MAX_ROWS,
       'GP_WS' => get_root_url() . 'ws.php?format=json&method=galleryPulse.live',
     ));
     break;
 
   case 'photos':
-    $sort = isset($_GET['sort']) && array_key_exists($_GET['sort'], gallery_pulse_photo_sorts()) ? $_GET['sort'] : 'views';
+    $albums = gallery_pulse_album_options();
+    $cat = isset($_GET['cat']) && isset($albums[(int)$_GET['cat']]) ? (int)$_GET['cat'] : null;
+    $cat_ids = $cat === null ? null : array_merge(array($cat), array_map('intval', get_subcat_ids(array($cat))));
+    $sort = isset($_GET['sort']) && is_string($_GET['sort']) && array_key_exists($_GET['sort'], gallery_pulse_photo_sorts()) ? $_GET['sort'] : 'views';
     $template->assign(array(
+      'GP_ALBUMS' => $albums,
+      'GP_CAT' => $cat,
       'GP_SORT' => $sort,
-      'GP_PHOTOS' => gallery_pulse_photo_stats($days, $token, $sort),
+      'GP_PHOTOS' => gallery_pulse_photo_stats($days, $cat_ids, $sort),
+    ));
+    break;
+
+  case 'photo':
+    $image_id = isset($_GET['image_id']) ? (int)$_GET['image_id'] : 0;
+    $template->assign(array(
+      'GP_IMAGE_ID' => $image_id,
+      'GP_PHOTO' => $image_id > 0 ? gallery_pulse_photo_detail($image_id, $days) : null,
     ));
     break;
 
@@ -81,6 +121,15 @@ switch ($tab)
 
   case 'links':
     $template->assign('GP_LINK_STATS', gallery_pulse_link_stats($days));
+    break;
+
+  case 'settings':
+    $template->assign(array(
+      'GP_TOKEN' => get_pwg_token(),
+      'GP_RETENTION_MIN' => GALLERY_PULSE_RETENTION_MIN,
+      'GP_RETENTION_MAX' => GALLERY_PULSE_RETENTION_MAX,
+      'GP_TABLE' => gallery_pulse_table_info(),
+    ));
     break;
 }
 

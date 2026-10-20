@@ -5,14 +5,15 @@ what Piwigo's History can't show: which photos guests open in the lightbox, how 
 they stay on each, how far they zoom, when they try to save one, and what each guest
 did, grouped by share link.
 
-Admin: **Plugins → Gallery Pulse**, four tabs:
+Admin: **Plugins → Gallery Pulse**, five tabs:
 
 | Tab | Shows |
 |---|---|
-| Live | Newest events, polled every 5 s |
-| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads. Sortable and filterable by period and by share link |
+| Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen |
+| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads. Sortable; filterable by period and by album (an album includes its sub-albums). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately |
 | Visitors | One row per browser; click a row for that guest's timeline |
-| Links | Totals per share link |
+| Links | Totals per share link, named by the shared album's full path |
+| Settings | Retention, and the event table's size |
 
 ## What is recorded
 
@@ -51,8 +52,13 @@ can see are accepted.
 **Not tracked:** admins (no beacon, ingest ignores them), clients without JS, and
 Batch Downloader zip downloads.
 
-**Retention:** 180 days. The prune runs once a day, triggered by beacon traffic
-(Piwigo has no scheduler).
+**Retention:** 730 days by default, set on the Settings tab (30–3650). The prune runs
+once a day, triggered by beacon traffic (Piwigo has no scheduler). A row is about
+100 bytes plus indexes, so even 50,000 events a year stays around 20 MB for two years.
+
+**Piwigo History** is only read, never written: the photo detail page shows core
+photo-page views and downloads for the period and the all-time hit counter, labeled
+as a separate count because it includes admins and visits from before the plugin.
 
 ## Requirements
 

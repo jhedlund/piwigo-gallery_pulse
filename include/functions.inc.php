@@ -1,7 +1,9 @@
 <?php
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
-define('GALLERY_PULSE_RETENTION_DAYS', 180);
+define('GALLERY_PULSE_RETENTION_DEFAULT', 730);
+define('GALLERY_PULSE_RETENTION_MIN', 30);
+define('GALLERY_PULSE_RETENTION_MAX', 3650);
 define('GALLERY_PULSE_MAX_BATCH', 50);
 // Beacon events may be backdated by up to MAX_AGE seconds (queued in the
 // browser), so the rate windows cover MAX_AGE plus one minute.
@@ -25,6 +27,21 @@ function gallery_pulse_client_events()
     'fullscreen' => array(null),
     'save_intent' => array('contextmenu', 'longpress', 'drag'),
   );
+}
+
+/**
+ * Days of events to keep, from the plugin settings.
+ */
+function gallery_pulse_retention_days()
+{
+  global $conf;
+
+  $days = isset($conf['gallery_pulse_retention_days']) ? (int)$conf['gallery_pulse_retention_days'] : 0;
+  if ($days < GALLERY_PULSE_RETENTION_MIN || $days > GALLERY_PULSE_RETENTION_MAX)
+  {
+    return GALLERY_PULSE_RETENTION_DEFAULT;
+  }
+  return $days;
 }
 
 function gallery_pulse_valid_sid($sid)
@@ -243,7 +260,7 @@ function gallery_pulse_maybe_prune()
 
   pwg_query('
 DELETE FROM ' . GALLERY_PULSE_TABLE . '
-  WHERE occurred_at < DATE_SUB(NOW(), INTERVAL ' . GALLERY_PULSE_RETENTION_DAYS . ' DAY)
+  WHERE occurred_at < DATE_SUB(NOW(), INTERVAL ' . gallery_pulse_retention_days() . ' DAY)
 ;');
 }
 
