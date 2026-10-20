@@ -1,0 +1,9 @@
+.gp-filters { margin: 10px 0 15px; text-align: left; }
+.gp-filters label { margin-right: 20px; }
+.gp-note { text-align: left; max-width: 900px; opacity: .8; }
+.gp-table { width: 100%; text-align: left; }
+.gp-table td, .gp-table th { padding: 4px 8px; vertical-align: middle; }
+.gp-photo img { height: 40px; width: auto; vertical-align: middle; margin-right: 6px; border-radius: 3px; }
+.gp-detail { opacity: .6; font-size: 90%; }
+.gp-new { animation: gp-flash 2s ease-out; }
+@keyframes gp-flash { from { background: rgba(255, 166, 0, .35); } to { background: transparent; } }

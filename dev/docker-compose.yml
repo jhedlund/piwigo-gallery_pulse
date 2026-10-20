@@ -1,0 +1,17 @@
+# Local Piwigo 16.4.0 for developing gallery_pulse. See dev/README.md.
+name: gallery-pulse-test
+services:
+  db:
+    image: mariadb:10.5
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: piwigo
+      MARIADB_USER: piwigo
+      MARIADB_PASSWORD: piwigo
+  web:
+    build: .
+    depends_on: [db]
+    ports: ["8089:80"]
+    volumes:
+      - ./www:/var/www/html/photos
+      - ..:/var/www/html/photos/plugins/gallery_pulse
