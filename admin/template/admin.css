@@ -1,9 +1,21 @@
+.gp-wrap { padding: 5px 25px 25px; text-align: left; }
 .gp-filters { margin: 10px 0 15px; text-align: left; }
 .gp-filters label { margin-right: 20px; }
+.gp-filters select { max-width: 480px; }
 .gp-note { text-align: left; max-width: 900px; opacity: .8; }
 .gp-table { width: 100%; text-align: left; }
 .gp-table td, .gp-table th { padding: 4px 8px; vertical-align: middle; }
+.gp-wrap table.gp-totals { width: auto; margin-left: 0; margin-right: auto; }
+.gp-totals td, .gp-totals th { padding-right: 24px; }
 .gp-photo img { height: 40px; width: auto; vertical-align: middle; margin-right: 6px; border-radius: 3px; }
+/* Hover preview: transform, so the row keeps its height. */
+.gp-photo img { position: relative; transition: transform .15s ease, box-shadow .15s ease; transform-origin: left center; }
+.gp-photo img:hover { transform: scale(3.5); z-index: 10; box-shadow: 0 4px 18px rgba(0, 0, 0, .45); }
+.gp-photo-head { display: flex; align-items: flex-start; gap: 20px; margin: 10px 0 20px; }
+.gp-photo-head img { max-width: 480px; max-height: 360px; border-radius: 4px; }
+.gp-photo-head h3 { margin-top: 0; }
+.gp-wrap h4 { margin: 25px 0 8px; text-align: left; }
 .gp-detail { opacity: .6; font-size: 90%; }
 .gp-new { animation: gp-flash 2s ease-out; }
 @keyframes gp-flash { from { background: rgba(255, 166, 0, .35); } to { background: transparent; } }
+.gp-settings, .gp-settings p { text-align: left; margin-left: 0; padding-left: 0; }
