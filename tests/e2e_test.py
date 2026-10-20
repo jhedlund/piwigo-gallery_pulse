@@ -415,6 +415,37 @@ def live_poll(ctx, sid, token, img, cat):
     page.close()
 
 
+ALBUM_CELLS = """ids => ids.map(id => {
+  const td = document.querySelector('#gp-live tr[data-id="' + id + '"] td.gp-album');
+  const a = td && td.querySelector('a');
+  return td ? [td.textContent.trim(), a ? a.href : null] : null;
+})"""
+
+
+def live_album(ctx, sid, token, sub_id, sub_img):
+    """Live's Album column: the viewed album's full path, the same whether polled or server-rendered."""
+    page = ctx.new_page()
+    page.goto(ADMIN + "-live")
+    check("Album" in page.inner_text("#gp-live thead") and "Link" not in page.inner_text("#gp-live thead"),
+          "live album: Link column replaced by Album")
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event, detail) VALUES "
+        "(NOW(), '%s', '%s', NULL, %s, 'page_view', 'album'), (NOW(), '%s', '%s', %s, %s, 'lightbox_view', NULL), "
+        "(NOW(), '%s', '%s', %s, NULL, 'fullscreen', NULL)"
+        % (sid, token, sub_id, sid, token, sub_img, sub_id, sid, token, sub_img))
+    ids = [r[0] for r in sql("SELECT id FROM piwigo_pulse_event ORDER BY id DESC LIMIT 3")][::-1]
+    for i in ids:
+        page.wait_for_selector("#gp-live tr[data-id='%s']" % i, timeout=5000)
+    polled = page.evaluate(ALBUM_CELLS, ids)
+    page.reload()
+    rendered = page.evaluate(ALBUM_CELLS, ids)
+    want = "Test Match / Second Half"
+    check(polled[0][0] == want and polled[1][0] == want and ("cat=%s" % sub_id) in (polled[0][1] or ""),
+          "live album: sub-album page view and lightbox show its full path, linked to Photos (%s)" % polled[:2])
+    check(polled[2] == ["", None], "live album: no album = empty cell, no link (%s)" % polled[2])
+    check(polled == rendered, "live album: polled rows match server-rendered rows (%s vs %s)" % (polled, rendered))
+    page.close()
+
+
 def live_trim(ctx, sid, token, img, cat):
     """Past the 2,000-row cap, a poll never drops rows Show older loaded, and every event stays reachable."""
     # Seeded out of id order by time, so trims and paging can't rely on the two agreeing.
@@ -537,6 +568,7 @@ def admin(p, token):
 
     live_poll(ctx, sid, token, top_img, top_id)
     live_trim(ctx, sid, token, top_img, top_id)
+    live_album(ctx, sid, token, sub_id, sub_img)
 
     # Album filter: full-path labels; a parent includes its sub-albums.
     html, _ = admin_page(page, ADMIN + "-photos&days=1")

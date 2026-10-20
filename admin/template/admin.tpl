@@ -75,13 +75,13 @@
 {if $GP_TAB == 'live'}
 <p class="gp-note">Newest first, updated within a second while guests are active (every 5 seconds when quiet); opens with the latest {$GP_LIVE_PAGE} events, and Show older pages further back. Admin sessions are not tracked — open a share link in a private window to see yourself here.</p>
 <table class="table2 gp-table" id="gp-live">
-  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Link</th><th>Event</th><th>Photo</th><th>Value</th><th>Device</th></tr></thead>
+  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Album</th><th>Event</th><th>Photo</th><th>Value</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_EVENTS item=e}
     <tr data-id="{$e.id}">
       <td>{$e.occurred_at_display}</td>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$e.sid}">{$e.guest}</a></td>
-      <td>{$e.link_name|escape}</td>
+      <td class="gp-album">{if $e.album_url}<a href="{$e.album_url|escape}">{$e.album_path|escape}</a>{/if}</td>
       <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}</td>
       <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" data-preview="{$e.preview}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
       <td>{$e.value}</td>
@@ -130,7 +130,14 @@
     a.href = visitorsUrl + e.sid;
     a.textContent = e.guest;
     cell(tr, null).appendChild(a);
-    cell(tr, e.link_name);
+    var album = cell(tr, null);
+    album.className = 'gp-album';
+    if (e.album_url) {
+      var al = document.createElement('a');
+      al.href = e.album_url;
+      al.textContent = e.album_path;
+      album.appendChild(al);
+    }
     var ev = cell(tr, e.event);
     if (e.detail) {
       var s = document.createElement('span');
