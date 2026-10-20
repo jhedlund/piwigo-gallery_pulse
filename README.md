@@ -66,8 +66,18 @@ to a link.
 total per 11 minutes. Without a share link, only photos and albums the visitor
 can see are accepted.
 
-**Not tracked:** admins (no beacon, ingest ignores them), clients without JS, and
-Batch Downloader zip downloads.
+**Batch Downloader zips** are logged as `download` with detail `zip`, one row per
+photo, from Batch Downloader's `batchdownload_end_zip` trigger. It fires once per zip
+as the zip is built, with that zip's photos only, so a multi-zip set logs each photo
+once and fetching a built zip again logs nothing. Browser, user and share link come
+from the request, like a single download (later zips of a big set are built on
+`/download/init_zip`, which carries the link through UnlistedAlbum's session grant).
+An album zip credits its album for every photo filed in it; other sets (tags, search,
+selections) use the photo's filed album. Batch Downloader only lets guests zip when
+`$conf['batch_download_guest_allowed']` is set, so on a gallery without it, share-link
+guests can't zip and zips come from logged-in users.
+
+**Not tracked:** admins (no beacon, ingest ignores them), clients without JS.
 
 **Retention:** 730 days by default, set on the Settings tab (30–3650). The prune runs
 once a day, triggered by beacon traffic (Piwigo has no scheduler). A row is about

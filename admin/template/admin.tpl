@@ -252,6 +252,7 @@
 <p class="gp-note">
   <b>Views</b> = lightbox slides a guest opened (slideshow autoplay excluded); <b>Photo page</b> = opens of the photo's own page, counted separately. <b>Save intent</b> = right-click, long-press or drag on the photo — what people do right before saving; it is intent, not a confirmed save. Screenshots cannot be detected.
   <b>Downloads</b> are logged by this plugin when the download button is used; Piwigo's own History counts them too, including yours — the two are different counts, don't add them.
+  Downloads also include Batch Downloader zips: one per photo in the zip, counted when the zip is built (so one 200-photo zip adds 200).
   An album includes its sub-albums. Click a photo for its details.
 </p>
 {if empty($GP_PHOTOS)}
@@ -417,7 +418,7 @@
 
 {* ---------------------------------------------------------------- Albums *}
 {if $GP_TAB == 'albums'}
-<p class="gp-note">One row per album, counting what guests did while looking at it. Since 1.2 a photo's events go to the album it was viewed in; older events go to the first album the photo is filed in. <b>Via</b> lists how guests got there, busiest first: a share link, or <i>direct</i> for public pages and logged-in users. Counts here are for the album itself; its Photos link includes sub-albums.</p>
+<p class="gp-note">One row per album, counting what guests did while looking at it. Downloads include Batch Downloader zips, one per photo, credited to the zipped album. Since 1.2 a photo's events go to the album it was viewed in; older events go to the first album the photo is filed in. <b>Via</b> lists how guests got there, busiest first: a share link, or <i>direct</i> for public pages and logged-in users. Counts here are for the album itself; its Photos link includes sub-albums.</p>
 {if empty($GP_ALBUM_STATS)}
 <p>No activity in this period.</p>
 {else}

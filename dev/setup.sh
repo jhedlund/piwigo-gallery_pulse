@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build a local Piwigo 16.4.0 with Bootstrap Darkroom + UnlistedAlbum copied from
+# Build a local Piwigo 16.4.0 with Bootstrap Darkroom, UnlistedAlbum and BatchDownloader copied from
 # the live install, seed a share-linked album, and print the share token.
 # Re-runnable: wipes the local install and database each time.
 set -euo pipefail
@@ -11,8 +11,8 @@ if [ ! -f www/index.php ]; then
   curl -sSL -o /tmp/piwigo-16.4.0.zip https://github.com/Piwigo/Piwigo/archive/refs/tags/16.4.0.zip
   unzip -q /tmp/piwigo-16.4.0.zip -d /tmp/piwigo-src && mv /tmp/piwigo-src/Piwigo-16.4.0 www && rm -rf /tmp/piwigo-src
 fi
-if [ ! -d www/themes/bootstrap_darkroom ]; then
-  ssh jhedlund.com "cd $LIVE && sudo tar czf - --exclude=.git themes/bootstrap_darkroom plugins/UnlistedAlbum" | tar xzf - -C www
+if [ ! -d www/themes/bootstrap_darkroom ] || [ ! -d www/plugins/BatchDownloader ]; then
+  ssh jhedlund.com "cd $LIVE && sudo tar czf - --exclude=.git themes/bootstrap_darkroom plugins/UnlistedAlbum plugins/BatchDownloader" | tar xzf - -C www
 fi
 
 docker compose down -v >/dev/null 2>&1 || true
@@ -32,7 +32,7 @@ ws --data "method=pwg.session.login&username=admin&password=adminpass" >/dev/nul
 TOK=$(ws --data "method=pwg.session.getStatus" | sed -E 's/.*"pwg_token":"([a-f0-9]+)".*/\1/')
 ws --data "method=pwg.themes.performAction&action=activate&theme=bootstrap_darkroom&pwg_token=$TOK" >/dev/null
 ws --data "method=pwg.themes.performAction&action=set_default&theme=bootstrap_darkroom&pwg_token=$TOK" >/dev/null
-for plugin in UnlistedAlbum gallery_pulse; do
+for plugin in UnlistedAlbum BatchDownloader gallery_pulse; do
   for action in install activate; do
     ws --data "method=pwg.plugins.performAction&action=$action&plugin=$plugin&pwg_token=$TOK" >/dev/null
   done
@@ -41,6 +41,9 @@ done
 # Same theme settings as the live gallery (thumbnails open the lightbox).
 docker compose exec -T db mariadb -upiwigo -ppiwigo piwigo -e \
   "REPLACE INTO piwigo_config (param, value) VALUES ('bootstrap_darkroom', '$(cat darkroom_config.json)')"
+# Same Batch Downloader settings as the live gallery (guests can't zip there; the e2e enables it per test).
+docker compose exec -T db mariadb -upiwigo -ppiwigo piwigo -e \
+  "REPLACE INTO piwigo_config (param, value) VALUES ('batch_download', '$(cat batch_download_config.txt)')"
 
 CAT=$(ws --data "method=pwg.categories.add&name=Test+Match" | sed -E 's/.*"id":([0-9]+).*/\1/')
 SUB=$(ws --data "method=pwg.categories.add&name=Second+Half&parent=$CAT" | sed -E 's/.*"id":([0-9]+).*/\1/')
