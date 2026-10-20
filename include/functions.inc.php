@@ -5,6 +5,8 @@ define('GALLERY_PULSE_RETENTION_DEFAULT', 730);
 define('GALLERY_PULSE_RETENTION_MIN', 30);
 define('GALLERY_PULSE_RETENTION_MAX', 3650);
 define('GALLERY_PULSE_TIMEZONE_DEFAULT', 'America/New_York');
+// Where the PHP container sees the host's GeoLite2 City database (a read-only mount).
+define('GALLERY_PULSE_GEOIP_DEFAULT', '/usr/share/GeoIP/GeoLite2-City.mmdb');
 define('GALLERY_PULSE_MAX_BATCH', 50);
 // Beacon events may be backdated by up to MAX_AGE seconds (queued in the
 // browser), so the rate windows cover MAX_AGE plus one minute.
@@ -64,6 +66,18 @@ function gallery_pulse_timezone()
 }
 
 /**
+ * GeoIP City database path from the plugin settings; '' = locations off.
+ */
+function gallery_pulse_geoip_path()
+{
+  global $conf;
+
+  return isset($conf['gallery_pulse_geoip_path']) && is_string($conf['gallery_pulse_geoip_path'])
+    ? $conf['gallery_pulse_geoip_path']
+    : GALLERY_PULSE_GEOIP_DEFAULT;
+}
+
+/**
  * A stored timestamp, shown in the display zone. Events are stored in UTC
  * (NOW() on a database server running in UTC); only display converts, so
  * period windows and the prune never see a local time.
@@ -88,6 +102,16 @@ function gallery_pulse_timezone_label()
   $name = gallery_pulse_timezone()->getName();
   $pos = strrpos($name, '/');
   return str_replace('_', ' ', $pos === false ? $name : substr($name, $pos + 1));
+}
+
+/**
+ * The visitor's address. The gallery is served directly (no proxy in front),
+ * so REMOTE_ADDR is the client; a proxy would need its client-IP header here.
+ */
+function gallery_pulse_request_ip()
+{
+  $ip = isset($_SERVER['REMOTE_ADDR']) ? filter_var($_SERVER['REMOTE_ADDR'], FILTER_VALIDATE_IP) : false;
+  return $ip === false ? null : $ip;
 }
 
 function gallery_pulse_valid_sid($sid)
@@ -328,13 +352,14 @@ function gallery_pulse_insert($rows)
       . gallery_pulse_sql_value($r['event']) . ','
       . gallery_pulse_sql_value($r['value']) . ','
       . gallery_pulse_sql_value($r['detail']) . ','
-      . gallery_pulse_sql_value($r['device'])
+      . gallery_pulse_sql_value($r['device']) . ','
+      . gallery_pulse_sql_value($r['ip'])
       . ')';
   }
 
   pwg_query('
 INSERT INTO ' . GALLERY_PULSE_TABLE . '
-  (occurred_at, sid, user_id, share_token, image_id, category_id, event, value, detail, device)
+  (occurred_at, sid, user_id, share_token, image_id, category_id, event, value, detail, device, ip)
   VALUES ' . implode(",\n    ", $values) . '
 ;');
 }
@@ -442,6 +467,7 @@ function gallery_pulse_build_rows($sid, $token, $events, $touch = null)
   $filed = gallery_pulse_filed_pairs($pairs);
 
   $device = gallery_pulse_device($touch);
+  $ip = gallery_pulse_request_ip();
   $rows = array();
   foreach ($events as $i => $ev)
   {
@@ -524,6 +550,7 @@ function gallery_pulse_build_rows($sid, $token, $events, $touch = null)
       'value' => $value,
       'detail' => $detail,
       'device' => $device,
+      'ip' => $ip,
     );
   }
 
@@ -711,6 +738,7 @@ SELECT COUNT(*)
     'value' => null,
     'detail' => $_GET['part'] == 'f' ? 'format' : null,
     'device' => $device,
+    'ip' => gallery_pulse_request_ip(),
   )));
 }
 
@@ -776,6 +804,7 @@ function gallery_pulse_log_zip_rows($data, $images_added)
     : gallery_pulse_filed_pairs(array_map(function ($id) use ($album) { return array($id, $album); }, $image_ids));
 
   $device = gallery_pulse_request_device($sid);
+  $ip = gallery_pulse_request_ip();
   $rows = array();
   foreach ($image_ids as $id)
   {
@@ -796,6 +825,7 @@ function gallery_pulse_log_zip_rows($data, $images_added)
       'value' => null,
       'detail' => 'zip',
       'device' => $device,
+      'ip' => $ip,
     );
   }
   gallery_pulse_insert($rows);

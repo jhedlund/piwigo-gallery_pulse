@@ -9,11 +9,11 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 
 | Tab | Shows |
 |---|---|
-| Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen. The Album column shows the album each event was viewed in (full path, linked to Photos filtered to it); the share link is on the visitor timeline |
+| Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen. The Album column shows the album each event was viewed in (full path, linked to Photos filtered to it); the share link is on the visitor timeline. The Event cell carries the value (`dwell 1.2s`, `zoom 2.4×`); the IP column shows the visitor's address with its city and country beneath |
 | Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads. Sortable; filterable by period and by album (an album includes its sub-albums). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
 | Visitors | One row per browser, by username when a registered user was logged in, with the albums they visited; filterable by album. Click a row for the visitor's timeline, which also shows the share link of each event |
 | Albums | Totals per album (full path), with the routes guests came by: each share link, or *direct* for public pages and logged-in users |
-| Settings | Retention, display time zone, and the event table's size |
+| Settings | Retention, display time zone, GeoIP database path, and the event table's size |
 
 ## What is recorded
 
@@ -30,7 +30,22 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 **Screenshots can't be detected.** The OS captures the screen without the page knowing.
 
 **Guest identity** is a first-party cookie, `pulse_sid` (random 128-bit, 30 days,
-renewed on each visit). No IP addresses are stored.
+renewed on each visit).
+
+**IP address** (since 1.5) is stored with every event: `REMOTE_ADDR`, which is the
+visitor because the gallery isn't behind a proxy or CDN. Events from before 1.5 have
+none. Live, the visitor timeline and the photo detail's Events table show it.
+
+**Location** ("City, CC", or the country alone when the database has no city) is read
+from a local MaxMind GeoLite2 City database when an admin page is shown, using
+MaxMind's pure-PHP reader (vendored in `include/vendor/`, Apache-2.0; no PHP extension
+needed). No address leaves the server and nothing is cached in the database. Private
+and reserved addresses get no location. The path is on the Settings tab, default
+`/usr/share/GeoIP/GeoLite2-City.mmdb` as the PHP container sees it (mount the host's
+GeoIP directory read-only; don't put the file under the web root, where it could be
+downloaded). Blank turns locations off; a missing or invalid file is reported on the
+Settings tab and pages show addresses without a location. GeoLite2 places an address
+at ISP level, sometimes a neighbouring town, and is only as current as the file.
 
 **Views** in the admin are lightbox views only. Photo-page opens are a separate
 column, so a guest who opens the photo page and then its lightbox isn't counted
@@ -109,3 +124,6 @@ python tests/e2e_test.py <token-from-setup>   # desktop Chromium + emulated iPho
 
 `setup.sh` copies the theme and UnlistedAlbum from the live server over ssh, the
 first time only. The plugin directory is bind-mounted, so edits apply immediately.
+Locations in the dev stack come from `dev/GeoIP2-City-Test.mmdb`, MaxMind's test
+database from github.com/maxmind/MaxMind-DB (`test-data/`), e.g. `81.2.69.160` =
+London, GB.

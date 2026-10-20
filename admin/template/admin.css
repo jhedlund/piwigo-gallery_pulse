@@ -20,3 +20,5 @@
 .gp-new { animation: gp-flash 2s ease-out; }
 @keyframes gp-flash { from { background: rgba(255, 166, 0, .35); } to { background: transparent; } }
 .gp-settings, .gp-settings p { text-align: left; margin-left: 0; padding-left: 0; }
+.gp-ip { word-break: normal; overflow-wrap: normal; }
+.gp-warning { color: #c0392b; opacity: 1; font-weight: bold; }

@@ -30,6 +30,7 @@ if ($tab == 'settings' && isset($_POST['save']))
   check_pwg_token();
   $retention = isset($_POST['retention_days']) ? (int)$_POST['retention_days'] : 0;
   $timezone = isset($_POST['timezone']) && is_string($_POST['timezone']) ? $_POST['timezone'] : '';
+  $geoip = isset($_POST['geoip_path']) && is_string($_POST['geoip_path']) ? trim($_POST['geoip_path']) : '';
   if ($retention < GALLERY_PULSE_RETENTION_MIN || $retention > GALLERY_PULSE_RETENTION_MAX)
   {
     $page['errors'][] = 'Retention must be between ' . GALLERY_PULSE_RETENTION_MIN . ' and ' . GALLERY_PULSE_RETENTION_MAX . ' days.';
@@ -38,10 +39,15 @@ if ($tab == 'settings' && isset($_POST['save']))
   {
     $page['errors'][] = 'Unknown time zone.';
   }
+  elseif ($geoip !== '' && (strlen($geoip) > 255 || !preg_match('~^/[A-Za-z0-9._/-]+$~', $geoip)))
+  {
+    $page['errors'][] = 'The GeoIP database path must be an absolute path of letters, digits and . _ - / (or blank to turn locations off).';
+  }
   else
   {
     conf_update_param('gallery_pulse_retention_days', $retention, true);
     conf_update_param('gallery_pulse_timezone', $timezone, true);
+    conf_update_param('gallery_pulse_geoip_path', $geoip, true);
     $page['infos'][] = 'Settings saved.';
   }
 }
@@ -145,6 +151,8 @@ switch ($tab)
       'GP_TIMEZONES' => DateTimeZone::listIdentifiers(),
       'GP_TIMEZONE' => gallery_pulse_timezone()->getName(),
       'GP_TABLE' => gallery_pulse_table_info(),
+      'GP_GEOIP_PATH' => gallery_pulse_geoip_path(),
+      'GP_GEOIP_PROBLEM' => gallery_pulse_geoip_problem(gallery_pulse_geoip_path()),
     ));
     break;
 }

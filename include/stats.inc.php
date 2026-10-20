@@ -231,11 +231,144 @@ function gallery_pulse_decorate_categories(&$rows)
   unset($r);
 }
 
+/**
+ * The GeoIP database reader, once per request; null when locations are off or
+ * the file can't be opened (the Settings tab says why).
+ */
+function gallery_pulse_geoip_reader()
+{
+  static $reader = false;
+  if ($reader === false)
+  {
+    $reader = null;
+    $path = gallery_pulse_geoip_path();
+    if ($path !== '' && is_file($path) && is_readable($path))
+    {
+      gallery_pulse_load_geoip_reader();
+      try
+      {
+        $reader = new MaxMind\Db\Reader($path);
+      }
+      catch (Throwable $e)
+      {
+        $reader = null;
+      }
+    }
+  }
+  return $reader;
+}
+
+function gallery_pulse_load_geoip_reader()
+{
+  $dir = GALLERY_PULSE_PATH . 'include/vendor/MaxMind/Db/';
+  foreach (array('Reader/InvalidDatabaseException', 'Reader/Util', 'Reader/Decoder', 'Reader/Metadata', 'Reader') as $f)
+  {
+    require_once($dir . $f . '.php');
+  }
+}
+
+/**
+ * Why the configured GeoIP database can't be used, or null when it can (or
+ * locations are off). For the Settings tab.
+ */
+function gallery_pulse_geoip_problem($path)
+{
+  if ($path === '')
+  {
+    return null;
+  }
+  if (!is_file($path) || !is_readable($path))
+  {
+    return 'The file can\'t be read, so no locations are shown.';
+  }
+  gallery_pulse_load_geoip_reader();
+  try
+  {
+    $reader = new MaxMind\Db\Reader($path);
+    $type = $reader->metadata()->databaseType;
+    $reader->close();
+  }
+  catch (Throwable $e)
+  {
+    return 'This isn\'t a MaxMind database (' . $e->getMessage() . '), so no locations are shown.';
+  }
+  return strpos($type, 'City') === false ? 'This is a ' . $type . ' database: locations show the country only.' : null;
+}
+
+/**
+ * ip => "City, CC" (or "CC" when the database has no city) from the local
+ * GeoIP database. Private and reserved addresses are skipped; addresses the
+ * database doesn't know are absent. Nothing leaves the server.
+ */
+function gallery_pulse_ip_locations($ips)
+{
+  static $cache = array();
+
+  $reader = gallery_pulse_geoip_reader();
+  if ($reader === null)
+  {
+    return array();
+  }
+  $locations = array();
+  foreach (array_unique($ips) as $ip)
+  {
+    if (!is_string($ip) || !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE))
+    {
+      continue;
+    }
+    if (!array_key_exists($ip, $cache))
+    {
+      $cache[$ip] = null;
+      try
+      {
+        $record = $reader->get($ip);
+      }
+      catch (Throwable $e)
+      {
+        $record = null;
+      }
+      $city = isset($record['city']['names']['en']) && is_string($record['city']['names']['en']) ? trim($record['city']['names']['en']) : '';
+      $country = isset($record['country']['iso_code']) && is_string($record['country']['iso_code']) ? $record['country']['iso_code'] : '';
+      $parts = array_filter(array($city, $country), 'strlen');
+      if (!empty($parts))
+      {
+        $cache[$ip] = implode(', ', $parts);
+      }
+    }
+    if ($cache[$ip] !== null)
+    {
+      $locations[$ip] = $cache[$ip];
+    }
+  }
+  return $locations;
+}
+
+/**
+ * An event's value with its unit, shown after the event name.
+ */
+function gallery_pulse_value_label($event, $value)
+{
+  if ($value === null)
+  {
+    return null;
+  }
+  if ($event == 'dwell')
+  {
+    return $value . 's';
+  }
+  if ($event == 'zoom')
+  {
+    return $value . '×';
+  }
+  return (string)$value;
+}
+
 function gallery_pulse_decorate_events(&$rows)
 {
   $links = gallery_pulse_link_names();
   gallery_pulse_decorate_images($rows);
   gallery_pulse_decorate_categories($rows);
+  $locations = gallery_pulse_ip_locations(array_map(function ($r) { return $r['ip']; }, $rows));
   $paths = gallery_pulse_category_paths(array_filter(array_map(function ($r) { return $r['category_id']; }, $rows)));
   foreach ($rows as &$r)
   {
@@ -248,6 +381,8 @@ function gallery_pulse_decorate_events(&$rows)
     $r['guest'] = substr($r['sid'], 0, 8);
     $r['link_name'] = $r['share_token'] !== null && isset($links[$r['share_token']]) ? $links[$r['share_token']] : null;
     $r['value'] = $r['value'] === null ? null : round((float)$r['value'], 2);
+    $r['value_label'] = gallery_pulse_value_label($r['event'], $r['value']);
+    $r['ip_location'] = $r['ip'] !== null && isset($locations[$r['ip']]) ? $locations[$r['ip']] : null;
     // occurred_at stays raw UTC: the Live poll sorts on it.
     $r['occurred_at_display'] = gallery_pulse_format_time($r['occurred_at']);
   }
@@ -273,7 +408,7 @@ function gallery_pulse_recent_events($since_id, $limit, $before_id = 0, $poll = 
     $order = $poll ? 'ASC' : 'DESC';
   }
   $query = '
-SELECT id, occurred_at, sid, share_token, image_id, category_id, event, value, detail, device
+SELECT id, occurred_at, sid, share_token, image_id, category_id, event, value, detail, device, ip
   FROM ' . GALLERY_PULSE_TABLE . '
   WHERE ' . $where . '
   ORDER BY id ' . $order . '
@@ -292,7 +427,7 @@ SELECT id, occurred_at, sid, share_token, image_id, category_id, event, value, d
 function gallery_pulse_visitor_timeline($sid)
 {
   $query = '
-SELECT id, occurred_at, sid, share_token, image_id, category_id, event, value, detail, device
+SELECT id, occurred_at, sid, share_token, image_id, category_id, event, value, detail, device, ip
   FROM ' . GALLERY_PULSE_TABLE . '
   WHERE sid = \'' . pwg_db_real_escape_string($sid) . '\'
   ORDER BY occurred_at, id
@@ -571,7 +706,7 @@ SELECT e.sid,
   unset($g);
 
   $timeline = query2array('
-SELECT e.id, e.occurred_at, e.sid, e.share_token, e.image_id, e.category_id, e.event, e.value, e.detail, e.device
+SELECT e.id, e.occurred_at, e.sid, e.share_token, e.image_id, e.category_id, e.event, e.value, e.detail, e.device, e.ip
   FROM ' . GALLERY_PULSE_TABLE . ' e
   WHERE ' . gallery_pulse_where($days, null) . '
     AND e.image_id = ' . $image_id . '

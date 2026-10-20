@@ -44,6 +44,9 @@ docker compose exec -T db mariadb -upiwigo -ppiwigo piwigo -e \
 # Same Batch Downloader settings as the live gallery (guests can't zip there; the e2e enables it per test).
 docker compose exec -T db mariadb -upiwigo -ppiwigo piwigo -e \
   "REPLACE INTO piwigo_config (param, value) VALUES ('batch_download', '$(cat batch_download_config.txt)')"
+# MaxMind's published test database instead of GeoLite2, so locations are offline and known.
+docker compose exec -T db mariadb -upiwigo -ppiwigo piwigo -e \
+  "REPLACE INTO piwigo_config (param, value) VALUES ('gallery_pulse_geoip_path', '/var/www/html/photos/plugins/gallery_pulse/dev/GeoIP2-City-Test.mmdb')"
 
 CAT=$(ws --data "method=pwg.categories.add&name=Test+Match" | sed -E 's/.*"id":([0-9]+).*/\1/')
 SUB=$(ws --data "method=pwg.categories.add&name=Second+Half&parent=$CAT" | sed -E 's/.*"id":([0-9]+).*/\1/')
