@@ -21,7 +21,8 @@ define('GALLERY_PULSE_TABLE_ROWS', 200);
  * Views = lightbox slides a person opened. Autoplay slides and photo-page
  * opens are excluded: a slideshow left running isn't attention, and a guest
  * who opens the photo page and then its lightbox would count twice. Dwell is
- * only measured on these slides, so avg dwell divides by this.
+ * only measured on these slides, but avg dwell is the mean of the recorded
+ * dwell samples, not total dwell divided by this.
  */
 function gallery_pulse_sql_views()
 {
