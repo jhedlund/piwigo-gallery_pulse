@@ -179,6 +179,40 @@ def autoplay(p, link):
     check(not any(r[4] == "dwell" and r[2] in auto_imgs for r in rows), "autoplay: no dwell for slideshow slides")
 
 
+# Date.now() runs __skew ms ahead, so minutes pass without waiting for them.
+SKEW = "window.__skew = 0; const realNow = Date.now; Date.now = () => realNow() + window.__skew;"
+
+
+def dwell_pause(p, link):
+    """Dwell stops 60 s after the last input and pauses while the window is out of focus."""
+    def one_slide(during):
+        since = max_id()
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        page.add_init_script(SKEW)
+        page.goto(link)
+        page.locator("#thumbnails a[data-index]").first.click()
+        page.wait_for_selector(".pswp--open")
+        page.wait_for_timeout(1000)
+        page.evaluate(during)
+        page.wait_for_timeout(300)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        page.goto("about:blank")
+        rows = wait_rows(since, lambda r: any(x[4] == "dwell" for x in r))
+        page.close()
+        return [float(r[5]) for r in rows if r[4] == "dwell"]
+
+    browser = p.chromium.launch()
+    control = one_slide("window.__skew += 30000")
+    check(len(control) == 1 and 30 <= control[0] < 40, "dwell: 30 s with no input still counts in full (%s)" % control)
+    idle = one_slide("window.__skew += 300000")
+    check(len(idle) == 1 and 60 <= idle[0] < 70, "dwell: 5 idle minutes stop counting 60 s after the last input (%s)" % idle)
+    blur = one_slide("window.dispatchEvent(new Event('blur')); window.__skew += 300000; "
+                     "window.dispatchEvent(new Event('focus'))")
+    check(len(blur) == 1 and blur[0] < 10, "dwell: 5 minutes out of focus are not counted (%s)" % blur)
+    browser.close()
+
+
 def page_context(p, link, token):
     since = max_id()
     html = urllib.request.urlopen(link).read().decode()
@@ -702,16 +736,17 @@ def geoip_setting(page, token, img, cat):
 
 
 def upgrade():
-    """Activating 1.5 over a 1.4 table adds the ip column; old rows stay intact, with no IP."""
+    """Activating 1.6 over a 1.4 table adds the ip column; old rows stay intact, with no IP."""
     snap = ("SELECT COUNT(*), MD5(GROUP_CONCAT(CONCAT_WS('|', id, occurred_at, sid, event, IFNULL(value,''), "
             "IFNULL(detail,''), IFNULL(device,'')) ORDER BY id)) FROM piwigo_pulse_event")
-    sql("ALTER TABLE piwigo_pulse_event DROP COLUMN ip")
+    sql("ALTER TABLE piwigo_pulse_event DROP COLUMN ip, DROP INDEX IF EXISTS k_cat")
     sql("UPDATE piwigo_plugins SET version = '1.4.0' WHERE id = 'gallery_pulse'")
     before = sql(snap)
     urllib.request.urlopen(BASE + "index.php").read()
     cols = [r[0] for r in sql("SHOW COLUMNS FROM piwigo_pulse_event")]
-    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.5.0"]], "upgrade: plugin updated to 1.5.0")
+    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.6.0"]], "upgrade: plugin updated to 1.6.0")
     check(cols[-2:] == ["device", "ip"], "upgrade: ip column added after device (%s)" % cols)
+    check(sql("SHOW INDEX FROM piwigo_pulse_event WHERE Key_name = 'k_cat'") != [], "upgrade: album index added")
     check(sql(snap) == before and sql("SELECT COUNT(*) FROM piwigo_pulse_event WHERE ip IS NOT NULL") == [["0"]],
           "upgrade: old rows intact, IP blank (%s)" % before)
 
@@ -870,6 +905,42 @@ def filters(ctx, token, top_id, sub_id, top_img, sub_img):
     _, clean = admin_page(page, ADMIN + "-visitors&f=1&days=1&guest=nobody%27s")
     check(clean and page.locator("#gp-visitors").count() == 0 and page.input_value("input[name=guest]") == "nobody's",
           "guest filter: unknown guest = no rows, quote kept intact")
+
+    # A username that also reads as a browser id names the user only.
+    sql("INSERT INTO piwigo_users (id, username) VALUES (900, 'deadbeef')")
+    try:
+        sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, user_id, image_id, category_id, event) VALUES "
+            "(NOW() - INTERVAL 2 MINUTE, '%s', 900, %s, %s, 'lightbox_view'), "
+            "(NOW() - INTERVAL 2 MINUTE, '%s', NULL, %s, %s, 'lightbox_view')"
+            % ("7" * 32, top_img, top_id, "deadbeef" + "0" * 24, top_img, top_id))
+        admin_page(page, ADMIN + "-visitors&f=1&days=1&guest=deadbeef")
+        n = page.locator("#gp-visitors tbody tr").count()
+        check(n == 1, "guest filter: a hex-looking username matches the user, not browser ids too (%d rows)" % n)
+    finally:
+        sql("DELETE FROM piwigo_users WHERE id = 900")
+    admin_page(page, ADMIN + "-visitors&reset=1")
+
+    # Reset is offered for any change from the tab's default, a preset period or a Photos sort alone too.
+    admin_page(page, ADMIN + "-live&f=1&days=1")
+    check(page.locator("a.gp-reset").count() == 1, "reset: shown for a preset period alone")
+    admin_page(page, ADMIN + "-live&reset=1")
+    check(page.locator("a.gp-reset").count() == 0, "reset: hidden at the defaults")
+    admin_page(page, ADMIN + "-photos&f=1&sort=name&dir=asc")
+    check(page.locator("a.gp-reset").count() == 1, "reset: shown for a Photos sort alone")
+    admin_page(page, ADMIN + "-photos&reset=1")
+
+    # Avg dwell holds when the Event filter keeps only dwell (and so drops the views).
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, category_id, event, value, detail) VALUES "
+        "(NOW() - INTERVAL 1 MINUTE, '%s', %s, %s, 'lightbox_view', NULL, NULL), "
+        "(NOW() - INTERVAL 1 MINUTE, '%s', %s, %s, 'dwell', 10, NULL)" % (sid, sub_img, sub_id, sid, sub_img, sub_id))
+    admin_page(page, ADMIN + "-photos&f=1&days=1&ev[]=dwell&guest=" + sid[:8])
+    head = table_head(page, "#gp-photos")
+    total = next(i for i, h in enumerate(head) if h.startswith("Dwell"))
+    avg = next(i for i, h in enumerate(head) if h.startswith("Avg dwell"))
+    cells = page.eval_on_selector_all("#gp-photos tbody tr", "trs => trs.map(t => [...t.cells].map(c => c.innerText.trim()))")
+    check(len(cells) == 1 and cells[0][total] == "10" and cells[0][avg] == "10",
+          "avg dwell: kept when the Event filter is dwell only (%s)" % cells)
+    admin_page(page, ADMIN + "-photos&reset=1")
 
     # Date range, in display time.
     admin_page(page, ADMIN + "-visitors&f=1&days=custom&from=2026-01-14&to=2026-01-14&guest=" + sid[:8])
@@ -1100,6 +1171,7 @@ def main():
         b = iphone(p, link)
         check(a and b and a != b, "two devices = two guests under one link")
         autoplay(p, link)
+        dwell_pause(p, link)
         page_context(p, link, token)
         admin(p, token)
         viewed_album(p, link, token)

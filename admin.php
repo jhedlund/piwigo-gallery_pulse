@@ -106,8 +106,9 @@ $template->assign(array(
   'GP_PERIODS' => gallery_pulse_periods(),
   'GP_F' => $state,
   'GP_FILTERED' => $filtered,
-  // Narrowed beyond the period: shown so a sticky filter isn't forgotten.
-  'GP_NARROWED' => $state['cat'] !== null || !empty($state['ev']) || $state['guest'] !== '',
+  // Anything off the tab's default, period and Photos sort included: Reset is
+  // offered so a sticky filter isn't forgotten.
+  'GP_RESETTABLE' => $state != array_merge(gallery_pulse_filter_state(array(), $tab), array('sort' => 'views', 'dir' => 'desc')),
   'GP_QUERY' => $query,
   // The period alone, for links into the photo detail.
   'GP_PERIOD_QUERY' => gallery_pulse_filter_query(array_merge($state, array('cat' => null, 'ev' => array(), 'guest' => ''))),

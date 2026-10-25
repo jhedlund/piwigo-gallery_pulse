@@ -10,7 +10,7 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 | Tab | Shows |
 |---|---|
 | Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen. The Album column shows the album each event was viewed in (full path, linked to Photos filtered to it); the share link is on the visitor timeline. The Event cell carries the value (`dwell 1.2s`, `zoom 2.4×`); the IP column shows the visitor's address with its city and country beneath |
-| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads, avg dwell. Every column sorts either way on the server (the top 200 of that sort are shown). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
+| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads, avg dwell (mean of the dwell records). Every column sorts either way on the server (the top 200 of that sort are shown). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
 | Visitors | One row per browser, by username when a registered user was logged in, with the albums they viewed (latest first; three shown, the rest on hover over *+N more*) and the IP they were last seen from, with its location. The 200 most recently active are shown. Click a row for the visitor's timeline, which also shows the share link of each event |
 | Albums | Totals per album (full path), with the routes guests came by: each share link, or *direct* for public pages and logged-in users |
 | Settings | Retention, display time zone, GeoIP database path, and the event table's size |
@@ -18,7 +18,7 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 **Filters** (since 1.6) on Live, Photos, Visitors and Albums: period or a date range
 (whole days in the display time zone), album (with its sub-albums), events (any
 number; none ticked = all) and guest (a browser id as shown, 4+ characters, a
-username, or `no beacon`). Each tab keeps its own filter, and the Photos sort with it,
+username, or `no beacon`; an exact username wins over a browser id). Each tab keeps its own filter, and the Photos sort with it,
 in the admin's Piwigo user preferences, so a bare tab link brings it back; **Reset
 filters** clears it. A link carrying filter values (e.g. an Albums row's Photos link,
 which passes on the rest of the Albums filter) replaces the target tab's filter. Live
@@ -36,7 +36,7 @@ polled rows arrive.
 |---|---|---|
 | `page_view` | beacon | Album page (`album`) or photo page (`photo`) |
 | `lightbox_view` | beacon | Each PhotoSwipe slide shown. Slides advanced by the slideshow get detail `autoplay` and aren't counted as views |
-| `dwell` | beacon | Seconds on a slide, not counting time the tab was hidden. Capped at 1800. Not logged for slideshow slides |
+| `dwell` | beacon | Seconds on a slide, not counting time the tab was hidden or the window out of focus, nor anything past 60 s without mouse, touch or key input. Capped at 1800. Not logged for slideshow slides |
 | `zoom` | beacon | Highest zoom reached on a slide, as a multiple of fit-to-screen. Only logged above 1.05× |
 | `fullscreen` | beacon | Fullscreen entered while a slide is open |
 | `save_intent` | beacon | `contextmenu` (right-click), `longpress` (touch held ≥ 600 ms) or `drag` on the lightbox image or the photo page's main image. This is intent, not a confirmed save |

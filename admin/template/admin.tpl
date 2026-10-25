@@ -50,7 +50,7 @@
   </datalist>
   {/if}
   <button type="submit" class="buttonLike">Apply</button>
-  {if $GP_FILTERED && ($GP_NARROWED || $GP_CUSTOM)}<a href="{$GP_BASE}&amp;reset=1" class="gp-reset">Reset filters</a>{/if}
+  {if $GP_FILTERED && $GP_RESETTABLE}<a href="{$GP_BASE}&amp;reset=1" class="gp-reset">Reset filters</a>{/if}
 </form>
 {footer_script}
 (function () {

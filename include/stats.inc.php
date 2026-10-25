@@ -217,22 +217,14 @@ function gallery_pulse_utc(DateTime $d)
 }
 
 /**
- * Guest filter: a browser id prefix (as shown, 4+ hex digits), a username, or
- * "no beacon". Matches nothing when it is none of these.
+ * Guest filter: a username, else "no beacon" or a browser id prefix (as
+ * shown, 4+ hex digits). A username wins outright, so a name that also reads as
+ * a browser id never merges two visitors. Matches nothing when it is none of these.
  */
 function gallery_pulse_guest_where($guest)
 {
   global $conf;
 
-  $or = array();
-  if (strtolower($guest) === 'no beacon')
-  {
-    $or[] = 'e.sid = \'' . GALLERY_PULSE_NO_SID . '\'';
-  }
-  if (preg_match('/^[a-f0-9]{4,32}$/i', $guest))
-  {
-    $or[] = 'e.sid LIKE \'' . strtolower($guest) . '%\'';
-  }
   $user_ids = query2array('
 SELECT ' . $conf['user_fields']['id'] . ' AS id
   FROM ' . USERS_TABLE . '
@@ -240,19 +232,29 @@ SELECT ' . $conf['user_fields']['id'] . ' AS id
 ;', null, 'id');
   if (!empty($user_ids))
   {
-    $or[] = 'e.user_id IN (' . implode(',', array_map('intval', $user_ids)) . ')';
+    return 'e.user_id IN (' . implode(',', array_map('intval', $user_ids)) . ')';
   }
-  return empty($or) ? '0' : '(' . implode(' OR ', $or) . ')';
+  if (strtolower($guest) === 'no beacon')
+  {
+    return 'e.sid = \'' . GALLERY_PULSE_NO_SID . '\'';
+  }
+  if (preg_match('/^[a-f0-9]{4,32}$/i', $guest))
+  {
+    return 'e.sid LIKE \'' . strtolower($guest) . '%\'';
+  }
+  return '0';
 }
 
 /**
  * The most recent visitors, as the Guest filter names them, for its suggestions.
+ * Drawn from the newest events only, so it costs the same however long the
+ * history is.
  */
 function gallery_pulse_guest_suggestions()
 {
   $rows = query2array('
 SELECT sid, MAX(user_id) AS user_id, MAX(occurred_at) AS last_seen
-  FROM ' . GALLERY_PULSE_TABLE . '
+  FROM (SELECT sid, user_id, occurred_at FROM ' . GALLERY_PULSE_TABLE . ' ORDER BY occurred_at DESC LIMIT 5000) recent
   GROUP BY sid
   ORDER BY last_seen DESC
   LIMIT 100
@@ -736,7 +738,7 @@ SELECT e.image_id,
     MAX(CASE WHEN e.event = \'zoom\' THEN e.value END) AS max_zoom,
     SUM(e.event = \'save_intent\') AS saves,
     SUM(e.event = \'download\') AS downloads,
-    ' . $dwell . ' / NULLIF(' . gallery_pulse_sql_views() . ', 0) AS dwell_avg
+    AVG(CASE WHEN e.event = \'dwell\' THEN e.value END) AS dwell_avg
   FROM ' . GALLERY_PULSE_TABLE . ' e
     LEFT JOIN ' . IMAGES_TABLE . ' i ON i.id = e.image_id
   WHERE ' . gallery_pulse_where($state) . '
@@ -751,7 +753,9 @@ SELECT e.image_id,
   foreach ($rows as &$r)
   {
     $r['dwell_total'] = round((float)$r['dwell_total']);
-    $r['dwell_avg'] = $r['views'] > 0 ? round($r['dwell_total'] / $r['views'], 1) : 0;
+    // Over the dwell records themselves, so an Event filter of just dwell
+    // (which drops the views) still has an average.
+    $r['dwell_avg'] = $r['dwell_avg'] === null ? 0 : round((float)$r['dwell_avg'], 1);
     $r['max_zoom'] = $r['max_zoom'] === null ? null : round((float)$r['max_zoom'], 1);
   }
   unset($r);

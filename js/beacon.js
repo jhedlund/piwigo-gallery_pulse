@@ -12,6 +12,8 @@
   var ZOOM_SAMPLE_MS = 300;
   var LONG_PRESS_MS = 600;
   var COOKIE_DAYS = 30;
+  // Dwell stops counting this long after the last mouse, touch or key input.
+  var IDLE_MS = 60000;
 
   var config = null;
   var queue = [];
@@ -86,8 +88,45 @@
 
   /* ---- Lightbox ---- */
 
-  var current = null; // slide being looked at: { item, img, autoplay, shownAt, hiddenFor, hiddenAt, maxZoom }
+  var current = null; // slide being looked at: { item, img, autoplay, shownAt, pausedFor, pausedAt, maxZoom }
   var lightboxOpen = false;
+
+  /* Dwell pauses while the tab is hidden, the window is out of focus, or the
+   * guest has been idle for IDLE_MS. Idle is only evaluated at transitions,
+   * backdated to when it began, so no timer is needed. */
+  var blurred = false;
+  var idle = false;
+  var lastActivity = now();
+
+  function paused() { return document.hidden || blurred || idle; }
+
+  function updatePause(at) {
+    if (!current) { return; }
+    var p = paused();
+    if (p && current.pausedAt === null) {
+      current.pausedAt = Math.max(current.shownAt, at);
+    } else if (!p && current.pausedAt !== null) {
+      current.pausedFor += Math.max(0, at - current.pausedAt);
+      current.pausedAt = null;
+    }
+  }
+
+  function checkIdle() {
+    if (!idle && now() - lastActivity >= IDLE_MS) {
+      idle = true;
+      updatePause(lastActivity + IDLE_MS);
+    }
+  }
+
+  // Coming back to the page (focus, tab shown) counts as activity too.
+  function activity() {
+    checkIdle();
+    lastActivity = now();
+    if (idle) {
+      idle = false;
+      updatePause(lastActivity);
+    }
+  }
 
   function zoomRatio(pswp) {
     var item = pswp.currItem;
@@ -105,15 +144,18 @@
     var img = item && item.imageid ? parseInt(item.imageid, 10) : null;
     if (!img) { current = null; return; }
     var auto = autoplaying();
-    current = { item: item, img: img, autoplay: auto, shownAt: now(), hiddenFor: 0, hiddenAt: document.hidden ? now() : null, maxZoom: 1 };
+    checkIdle();
+    var t = now();
+    current = { item: item, img: img, autoplay: auto, shownAt: t, pausedFor: 0, pausedAt: paused() ? t : null, maxZoom: 1 };
     push('lightbox_view', img, auto ? { d: 'autoplay' } : null);
   }
 
   function endSlide() {
     if (!current) { return; }
+    checkIdle();
     var end = now();
-    var hidden = current.hiddenFor + (current.hiddenAt ? end - current.hiddenAt : 0);
-    var seconds = Math.max(0, (end - current.shownAt - hidden) / 1000);
+    var pausedMs = current.pausedFor + (current.pausedAt !== null ? end - current.pausedAt : 0);
+    var seconds = Math.max(0, (end - current.shownAt - pausedMs) / 1000);
     if (!current.autoplay) {
       push('dwell', current.img, { v: Math.round(seconds * 10) / 10 });
     }
@@ -233,15 +275,27 @@
 
   function bindLifecycle() {
     document.addEventListener('visibilitychange', function () {
-      if (current) {
-        if (document.hidden) {
-          current.hiddenAt = now();
-        } else if (current.hiddenAt) {
-          current.hiddenFor += now() - current.hiddenAt;
-          current.hiddenAt = null;
-        }
+      checkIdle();
+      updatePause(now());
+      if (document.hidden) {
+        flush();
+      } else {
+        activity();
       }
-      if (document.hidden) { flush(); }
+    });
+    window.addEventListener('blur', function () {
+      checkIdle();
+      blurred = true;
+      updatePause(now());
+    });
+    window.addEventListener('focus', function () {
+      checkIdle();
+      blurred = false;
+      updatePause(now());
+      activity();
+    });
+    ['mousemove', 'mousedown', 'wheel', 'keydown', 'touchstart', 'touchmove'].forEach(function (type) {
+      document.addEventListener(type, activity, { capture: true, passive: true });
     });
     window.addEventListener('pagehide', function () {
       if (current && attach.last) { sampleZoom(attach.last); }
