@@ -36,3 +36,15 @@
 .gp-sorted-asc::after { content: " \2191"; }
 .gp-sorted-desc::after { content: " \2193"; }
 .gp-albums div + div { margin-top: 2px; }
+/* Real-time: bubbles are placed with transforms by the page's script. */
+.gp-rt-status { text-align: left; font-weight: bold; }
+.gp-board { position: relative; height: 70vh; min-height: 420px; overflow: hidden; border-radius: 6px; background: rgba(127, 127, 127, .08); }
+.gp-rt-empty { display: none; position: absolute; top: 45%; left: 0; right: 0; text-align: center; opacity: .6; }
+.gp-board-empty .gp-rt-empty { display: block; }
+.gp-bubble { position: absolute; top: 0; left: 0; width: 0; height: 0; border-radius: 50%; will-change: transform; box-shadow: 0 3px 12px rgba(0, 0, 0, .35); }
+.gp-bubble img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+.gp-bubble:hover { z-index: 10; box-shadow: 0 0 0 3px #ffa600, 0 3px 12px rgba(0, 0, 0, .35); }
+.gp-ring { position: absolute; inset: 0; border-radius: 50%; pointer-events: none; }
+.gp-ring.gp-pulse { animation: gp-ring 1.2s ease-out; }
+@keyframes gp-ring { from { box-shadow: 0 0 0 0 rgba(255, 166, 0, .8); } to { box-shadow: 0 0 0 24px rgba(255, 166, 0, 0); } }
+@media (prefers-reduced-motion: reduce) { .gp-ring.gp-pulse { animation: none; } }

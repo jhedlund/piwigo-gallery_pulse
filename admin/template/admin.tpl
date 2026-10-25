@@ -49,13 +49,20 @@
     {foreach from=$GP_GUESTS item=g}<option value="{$g|escape}">{/foreach}
   </datalist>
   {/if}
-  <button type="submit" class="buttonLike">Apply</button>
   {if $GP_FILTERED && $GP_RESETTABLE}<a href="{$GP_BASE}&amp;reset=1" class="gp-reset">Reset filters</a>{/if}
 </form>
+{* No Apply button: each control applies itself once its value is settled. *}
 {footer_script}
 (function () {
   var form = document.getElementById('gp-filters');
   var range = form.querySelector('.gp-range');
+  function state() { return new URLSearchParams(new FormData(form)).toString(); }
+  var initial = state(), pending = null;
+  function apply() {
+    clearTimeout(pending);
+    if (state() !== initial) { form.submit(); }
+  }
+  form.addEventListener('submit', function (ev) { ev.preventDefault(); apply(); });
   form.querySelectorAll('select[data-submit]').forEach(function (sel) {
     sel.addEventListener('change', function () {
       if (sel.name === 'days') {
@@ -66,7 +73,45 @@
         }
         range.hidden = true;
       }
-      form.submit();
+      apply();
+    });
+  });
+  // Events: tick any number, applied when the list closes (or on a click
+  // outside it, which closes it).
+  var multi = form.querySelector('details.gp-multi');
+  if (multi) {
+    multi.addEventListener('toggle', function () { if (!multi.open) { apply(); } });
+    document.addEventListener('click', function (ev) {
+      if (multi.open && !multi.contains(ev.target)) { multi.open = false; }
+    });
+  }
+  // Guest: Enter, leaving the box, or a suggestion picked from the list.
+  // Dates: Enter, leaving the range, or both filled in. A typed date fires
+  // change on every keystroke that makes a valid date (year 0002, 0020...),
+  // so a full range waits for typing to pause.
+  form.querySelectorAll('input[type=search], input[type=date]').forEach(function (input) {
+    input.addEventListener('keydown', function (ev) {
+      clearTimeout(pending);
+      if (ev.key === 'Enter') { ev.preventDefault(); apply(); }
+    });
+  });
+  var guest = form.querySelector('input[name=guest]');
+  if (guest) {
+    guest.addEventListener('blur', apply);
+    guest.addEventListener('input', function (ev) {
+      if (!ev.inputType || ev.inputType === 'insertReplacementText') { apply(); }
+    });
+  }
+  range.addEventListener('focusout', function (ev) {
+    if (!range.contains(ev.relatedTarget)) { apply(); }
+  });
+  range.querySelectorAll('input').forEach(function (input) {
+    input.addEventListener('change', function () {
+      clearTimeout(pending);
+      var full = Array.prototype.every.call(range.querySelectorAll('input'), function (i) {
+        return /^[2-9]\d\d\d-/.test(i.value);
+      });
+      if (full) { pending = setTimeout(apply, 800); }
     });
   });
 })();
@@ -172,6 +217,251 @@
   });
 })();
 {/footer_script}
+
+{* ------------------------------------------------------------- Real-time *}
+{if $GP_TAB == 'realtime'}
+<p class="gp-note">Photos float up as guests view them, grow with views, zooms, saves and downloads, and fade after a quiet spell (a photo's activity halves every {$GP_RT_HALF_LIFE} minutes; nothing older than {$GP_RT_WINDOW} minutes counts). Click a photo for its details. Nothing here is kept — it starts fresh each time it's opened.</p>
+<p class="gp-rt-status" id="gp-rt-status">Loading…</p>
+<div class="gp-board" id="gp-board"><p class="gp-rt-empty">Waiting for guests — photos appear here as they're viewed.</p></div>
+{footer_script}
+(function () {
+  var board = document.getElementById('gp-board');
+  var status = document.getElementById('gp-rt-status');
+  var POLL = {$GP_LIVE_POLL}, MAX = {$GP_RT_MAX};
+  var WINDOW = {$GP_RT_WINDOW} * 60000, HALF = {$GP_RT_HALF_LIFE} * 60000;
+  var MIN_R = 24, MAX_R = 90, FLOOR = 0.15, ACTIVE = 5 * 60000;
+  var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // image_id => bubble; sid => last event time. Times are the database's
+  // clock in ms: resynced from every response, advanced by tick() between.
+  var bubbles = new Map(), guests = new Map();
+  var clock = null, lastEvent = null, sinceId = 0;
+
+  function utc(s) { return Date.parse(s.replace(' ', 'T') + 'Z'); }
+
+  function weight(e) {
+    switch (e.event) {
+      case 'lightbox_view': return e.detail === 'autoplay' ? 0.5 : 1;
+      case 'page_view': return 1;
+      case 'dwell': return (e.value || 0) / 10;
+      case 'zoom': return 2;
+      case 'save_intent': return 3;
+      case 'download': return 4;
+      default: return 1;
+    }
+  }
+
+  function score(b) { return b.score * Math.pow(0.5, (clock - b.scoreAt) / HALF); }
+
+  function bubble(e) {
+    var a = document.createElement('a');
+    a.className = 'gp-bubble';
+    a.setAttribute('data-id', e.image_id);
+    a.href = e.detail_url;
+    a.title = e.image_name || '';
+    var img = document.createElement('img');
+    img.src = e.thumb;
+    img.alt = '';
+    a.appendChild(img);
+    a.appendChild(document.createElement('span')).className = 'gp-ring';
+    board.appendChild(a);
+    var w = board.clientWidth, h = board.clientHeight;
+    return {
+      id: e.image_id, el: a, img: img, preview: e.preview, score: 0, scoreAt: clock, lastAt: 0,
+      x: w / 2 + (Math.random() - 0.5) * w * 0.5, y: h / 2 + (Math.random() - 0.5) * h * 0.5,
+      vx: 0, vy: 0, r: 0, heading: Math.random() * 2 * Math.PI
+    };
+  }
+
+  function add(e, live) {
+    var t = utc(e.occurred_at);
+    if (clock - t > WINDOW) { return; }
+    guests.set(e.sid, Math.max(guests.get(e.sid) || 0, t));
+    lastEvent = Math.max(lastEvent || 0, t);
+    // Album-only events just feed the status line.
+    if (!e.image_id || !e.thumb) { return; }
+    var b = bubbles.get(e.image_id);
+    if (!b) {
+      b = bubble(e);
+      bubbles.set(e.image_id, b);
+    }
+    b.score = score(b) + weight(e) * Math.pow(0.5, Math.max(0, clock - t) / HALF);
+    b.scoreAt = clock;
+    b.lastAt = Math.max(b.lastAt, t);
+    if (live && !still) {
+      var kick = 60 + Math.random() * 60, dir = Math.random() * 2 * Math.PI;
+      b.vx += Math.cos(dir) * kick;
+      b.vy += Math.sin(dir) * kick;
+      var ring = b.el.lastChild;
+      ring.classList.remove('gp-pulse');
+      void ring.offsetWidth; // restart the animation
+      ring.classList.add('gp-pulse');
+    }
+  }
+
+  function remove(b) {
+    bubbles.delete(b.id);
+    board.removeChild(b.el);
+  }
+
+  // Busy zips can flood the board: keep the highest scores.
+  function cap() {
+    if (bubbles.size <= MAX) { return; }
+    Array.from(bubbles.values()).sort(function (a, b) { return score(a) - score(b); })
+      .slice(0, bubbles.size - MAX).forEach(remove);
+  }
+
+  function ago(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    return s < 60 ? s + ' s' : s < 3600 ? Math.floor(s / 60) + ' m' : Math.floor(s / 3600) + ' h';
+  }
+
+  function showStatus() {
+    var n = 0;
+    guests.forEach(function (t, sid) {
+      if (clock - t > WINDOW) { guests.delete(sid); } else if (clock - t <= ACTIVE) { n++; }
+    });
+    status.textContent = (n === 1 ? '1 guest' : n + ' guests') + ' active'
+      + (lastEvent === null ? ' · no activity in the last ' + WINDOW / 60000 + ' minutes'
+        : clock - lastEvent < 10000 ? ' · active now' : ' · quiet for ' + ago(clock - lastEvent));
+  }
+
+  // One step: decay, sizes, motion, then draw. Decay uses the whole dt, so a
+  // test can jump minutes ahead; motion is clamped to a short step.
+  var statusAt = 0;
+  function tick(dtMs) {
+    if (clock === null) { return; }
+    clock += dtMs;
+    var dt = Math.min(dtMs, 50) / 1000;
+    var w = board.clientWidth, h = board.clientHeight;
+    var list = Array.from(bubbles.values()), top = 4;
+    list.forEach(function (b) { b.s = score(b); top = Math.max(top, b.s); });
+    list.forEach(function (b) {
+      var gone = b.s < FLOOR || clock - b.lastAt > WINDOW;
+      var target = gone ? 0 : MIN_R + (MAX_R - MIN_R) * Math.sqrt(b.s / top);
+      b.r += (target - b.r) * Math.min(1, dt * 4 + (dtMs > 1000 ? 1 : 0));
+      if (gone && b.r < 2) { remove(b); b.dead = true; }
+    });
+    list = list.filter(function (b) { return !b.dead; });
+    list.forEach(function (b) {
+      var ax = (w / 2 - b.x) * 0.4, ay = (h / 2 - b.y) * 0.4;
+      if (!still) {
+        b.heading += (Math.random() - 0.5) * dt * 3;
+        ax += Math.cos(b.heading) * 15;
+        ay += Math.sin(b.heading) * 15;
+      }
+      b.vx = (b.vx + ax * dt) * Math.exp(-2 * dt);
+      b.vy = (b.vy + ay * dt) * Math.exp(-2 * dt);
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    });
+    // Push overlapping pairs apart, a few passes so a crowd settles.
+    for (var pass = 0; pass < 3; pass++) {
+      for (var i = 0; i < list.length; i++) {
+        for (var j = i + 1; j < list.length; j++) {
+          var p = list[i], q = list[j];
+          var dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          var overlap = p.r + q.r + 6 - d;
+          if (overlap > 0) {
+            var mx = dx / d * overlap / 2, my = dy / d * overlap / 2;
+            p.x -= mx; p.y -= my; q.x += mx; q.y += my;
+          }
+        }
+      }
+    }
+    list.forEach(function (b) {
+      b.x = Math.min(Math.max(b.x, b.r), w - b.r);
+      b.y = Math.min(Math.max(b.y, b.r), h - b.r);
+      var size = 2 * b.r;
+      b.el.style.width = b.el.style.height = size + 'px';
+      b.el.style.transform = 'translate(' + (b.x - b.r) + 'px,' + (b.y - b.r) + 'px)';
+      // The thumbnail blurs past ~140 px: switch to the larger derivative.
+      if (size > 140 && b.preview && !b.big) { b.big = true; b.img.src = b.preview; }
+    });
+    board.classList.toggle('gp-board-empty', list.length === 0);
+    if (clock - statusAt >= 1000 || dtMs > 1000) { statusAt = clock; showStatus(); }
+  }
+
+  var frame = null, prev = 0;
+  function loop(ts) {
+    tick(prev ? Math.min(ts - prev, 1000) : 16);
+    prev = ts;
+    frame = requestAnimationFrame(loop);
+  }
+
+  function fetchEvents(query) {
+    return fetch('{$GP_WS}&' + query, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.stat !== 'ok') { throw new Error(data.message); }
+        clock = utc(data.result.now);
+        return data.result.events;
+      });
+  }
+
+  // The newest page, newest first: Show older from the top.
+  function seed() {
+    bubbles.forEach(remove);
+    guests.clear();
+    lastEvent = null;
+    return fetchEvents('before_id=' + Number.MAX_SAFE_INTEGER).then(function (events) {
+      events.forEach(function (e) { sinceId = Math.max(sinceId, e.id); });
+      events.slice().reverse().forEach(function (e) { add(e, false); });
+      cap();
+      tick(0);
+      showStatus();
+    });
+  }
+
+  var busy = false, timer = null, empties = 0;
+  function poll() {
+    if (busy) { return; }
+    busy = true;
+    fetchEvents('since_id=' + sinceId)
+      .then(function (events) {
+        events.forEach(function (e) {
+          sinceId = Math.max(sinceId, e.id);
+          add(e, true);
+        });
+        cap();
+        return events.length;
+      })
+      .catch(function () { return 0; })
+      .then(function (count) {
+        busy = false;
+        if (count >= POLL) { poll(); return; }
+        empties = count > 0 ? 0 : empties + 1;
+        schedule(empties >= 3 ? 5000 : 1000);
+      });
+  }
+  function schedule(ms) {
+    clearTimeout(timer);
+    timer = document.hidden ? null : setTimeout(poll, ms);
+  }
+  function start() {
+    empties = 0;
+    seed().catch(function () { status.textContent = 'Could not load activity.'; })
+      .then(function () { schedule(1000); });
+  }
+  // Hidden: stop. Shown again: start over from the newest rather than replay the gap.
+  document.addEventListener('visibilitychange', function () {
+    clearTimeout(timer);
+    if (!document.hidden) { start(); }
+  });
+  start();
+  frame = requestAnimationFrame(loop);
+
+  window.gpRealtime = {
+    tick: tick,
+    bubbles: function () {
+      return Array.from(bubbles.values()).map(function (b) {
+        return { id: b.id, r: b.r, score: score(b), x: b.x, y: b.y, src: b.img.src };
+      });
+    },
+    stop: function () { cancelAnimationFrame(frame); clearTimeout(timer); frame = null; }
+  };
+})();
+{/footer_script}
+{/if}
 
 {* ------------------------------------------------------------------ Live *}
 {if $GP_TAB == 'live'}

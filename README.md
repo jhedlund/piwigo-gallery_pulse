@@ -5,10 +5,11 @@ what Piwigo's History can't show: which photos guests open in the lightbox, how 
 they stay on each, how far they zoom, when they try to save one, and what each guest
 did, grouped by share link.
 
-Admin: **Plugins → Gallery Pulse**, five tabs:
+Admin: **Plugins → Gallery Pulse**, six tabs (Live is the one it opens on):
 
 | Tab | Shows |
 |---|---|
+| Real-time | (since 1.7) A board of floating photo thumbnails for watching guests live: a photo appears when it's viewed, grows with activity (view or photo page +1, dwell +1 per 10 s, zoom +2, save intent +3, download +4), pulses on each new event, and shrinks away as its score decays (half-life 5 minutes; nothing older than 30 minutes counts). At most 60 photos at once. Unfiltered, and nothing is kept: it opens from the newest events and starts over when the browser tab is shown again. Polls like Live. Click a photo for its detail page |
 | Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen. The Album column shows the album each event was viewed in (full path, linked to Photos filtered to it); the share link is on the visitor timeline. The Event cell carries the value (`dwell 1.2s`, `zoom 2.4×`); the IP column shows the visitor's address with its city and country beneath |
 | Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads, avg dwell (mean of the dwell records). Every column sorts either way on the server (the top 200 of that sort are shown). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
 | Visitors | One row per browser, by username when a registered user was logged in, with the albums they viewed (latest first; three shown, the rest on hover over *+N more*) and the IP they were last seen from, with its location. The 200 most recently active are shown. Click a row for the visitor's timeline, which also shows the share link of each event |
@@ -18,7 +19,7 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 **Filters** (since 1.6) on Live, Photos, Visitors and Albums: period or a date range
 (whole days in the display time zone), album (with its sub-albums), events (any
 number; none ticked = all) and guest (a browser id as shown, 4+ characters, a
-username, or `no beacon`; an exact username wins over a browser id). Each tab keeps its own filter, and the Photos sort with it,
+username, or `no beacon`; an exact username wins over a browser id). There is no Apply button (since 1.7): a list applies when changed, Events when its list closes, Guest on Enter, on leaving the box or on picking a suggestion, and a date range once both dates are in (or on Enter, or on leaving the range). Each tab keeps its own filter, and the Photos sort with it,
 in the admin's Piwigo user preferences, so a bare tab link brings it back; **Reset
 filters** clears it. A link carrying filter values (e.g. an Albums row's Photos link,
 which passes on the rest of the Albums filter) replaces the target tab's filter. Live

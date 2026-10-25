@@ -7,6 +7,7 @@ include_once(PHPWG_ROOT_PATH . 'admin/include/tabsheet.class.php');
 include_once(GALLERY_PULSE_PATH . 'include/stats.inc.php');
 
 $tabs = array(
+  'realtime' => 'Real-time',
   'live' => 'Live',
   'photos' => 'Photos',
   'visitors' => 'Visitors',
@@ -126,6 +127,16 @@ $template->assign(array(
 
 switch ($tab)
 {
+  case 'realtime':
+    $template->assign(array(
+      'GP_WS' => get_root_url() . 'ws.php?format=json&method=galleryPulse.live',
+      'GP_LIVE_POLL' => GALLERY_PULSE_LIVE_POLL,
+      'GP_RT_WINDOW' => GALLERY_PULSE_RT_WINDOW,
+      'GP_RT_HALF_LIFE' => GALLERY_PULSE_RT_HALF_LIFE,
+      'GP_RT_MAX' => GALLERY_PULSE_RT_MAX_BUBBLES,
+    ));
+    break;
+
   case 'live':
     $events = gallery_pulse_recent_events($state, 0, GALLERY_PULSE_LIVE_PAGE);
     $template->assign(array(
