@@ -338,16 +338,32 @@
       return dx * dx + dy * dy >= min * min;
     });
   }
+  // Walk a spiral out to the corners for the first free spot; false if none.
+  function place(b, placed, w, h) {
+    for (var a = 0, d = 0, far = Math.sqrt(w * w + h * h) / 2; d <= far; a += Math.min(0.25, 10 / Math.max(d, 1))) {
+      d = 3 * a;
+      b.x = w / 2 + d * Math.cos(a);
+      b.y = h / 2 + d * Math.sin(a);
+      if (fits(b, placed, w, h)) { return true; }
+    }
+    return false;
+  }
+  // A full board of big bubbles can't fit at full size (60 × 180 px is more
+  // area than the board), so scale every radius to roughly fit the area first,
+  // then shrink further until each one finds a free spot.
   function pack(list, w, h) {
-    var placed = [];
-    list.slice().sort(function (a, b) { return b.r - a.r || a.id - b.id; }).forEach(function (b) {
-      for (var k = 0, a = 0; k < 3000; k++, a += 0.25) {
-        b.x = w / 2 + 3 * a * Math.cos(a);
-        b.y = h / 2 + 3 * a * Math.sin(a);
-        if (fits(b, placed, w, h)) { break; }
-      }
-      placed.push(b);
-    });
+    var order = list.slice().sort(function (a, b) { return b.r - a.r || a.id - b.id; });
+    var base = order.map(function (b) { return b.r; });
+    var area = base.reduce(function (s, r) { return s + Math.PI * (r + 3) * (r + 3); }, 0);
+    var k = Math.min(1, Math.sqrt(0.5 * w * h / Math.max(area, 1)));
+    for (var tries = 0; tries < 20; tries++, k *= 0.9) {
+      var placed = [];
+      var ok = order.every(function (b, i) {
+        b.r = base[i] * k;
+        return place(b, placed, w, h) && placed.push(b);
+      });
+      if (ok) { return; }
+    }
   }
 
   // One step: decay, sizes, motion, then draw. Decay uses the whole dt, so a
@@ -459,11 +475,13 @@
     });
   }
 
-  var busy = false, timer = null, empties = 0;
+  // busy is the generation with a poll in flight: an older poll still hanging
+  // after a restart must neither block the new generation's polls nor, when
+  // it finally settles, clear their flag or schedule a second chain.
+  var busy = null, timer = null, empties = 0;
   function poll() {
-    if (busy || !ready) { return; }
-    busy = true;
-    var mine = gen;
+    if (busy === gen || !ready) { return; }
+    var mine = busy = gen;
     fetchEvents('since_id=' + sinceId)
       .then(function (events) {
         if (mine !== gen) { return 0; }
@@ -476,8 +494,8 @@
       })
       .catch(function () { return 0; })
       .then(function (count) {
-        busy = false;
-        if (!ready) { return; }
+        if (busy === mine) { busy = null; }
+        if (mine !== gen || !ready) { return; }
         if (count >= POLL) { poll(); return; }
         empties = count > 0 ? 0 : empties + 1;
         schedule(empties >= 3 ? 5000 : 1000);

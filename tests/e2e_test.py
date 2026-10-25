@@ -740,7 +740,54 @@ def realtime(ctx, sid, token, img, other_img, cat):
     check(spots(before) == spots(after) and not overlaps and off_centre(biggest) == min(off_centre(b) for b in after),
           "realtime: reduced motion holds a still, packed layout (moved=%s, overlaps=%s)"
           % (spots(before) != spots(after), overlaps))
+
+    # ...and a full board of equally busy photos still fits without overlap.
+    full = [dict(e, id=10 ** 9 + n) for n, e in enumerate(flood[1:61])]
+    still.unroute(seed_ws)
+    still.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": full[::-1], "now": "2026-01-01 00:00:01"}})))
+    admin_page(still, ADMIN + "-realtime")
+    still.wait_for_function("gpRealtime.bubbles().length === 60", timeout=5000)
+    still.wait_for_timeout(300)
+    bs = still.evaluate(BUBBLES)
+    overlaps = sum(1 for i, p in enumerate(bs) for q in bs[i + 1:]
+                   if math.hypot(p["x"] - q["x"], p["y"] - q["y"]) < p["r"] + q["r"] - 0.5)
+    outside = sum(1 for b in bs if b["x"] < b["r"] - 0.5 or b["y"] < b["r"] - 0.5
+                  or b["x"] > size[0] - b["r"] + 0.5 or b["y"] > size[1] - b["r"] + 0.5)
+    check(len(bs) == 60 and overlaps == 0 and outside == 0 and min(b["r"] for b in bs) >= 15,
+          "realtime: reduced motion fits a full board of 60 without overlap (%d overlapping, %d outside, r %.0f)"
+          % (overlaps, outside, min(b["r"] for b in bs)))
     still.close()
+
+    # A poll hanging across a hide/show must not stall the fresh generation's polling.
+    hung = ctx.new_page()
+    held, polls = [], []
+    def hold_first(route):
+        polls.append(route.request.url)
+        if not held:
+            held.append(route)  # never answered until the end
+        else:
+            empty(route)
+    hung.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": flood[5:6], "now": "2026-01-01 00:00:01"}})))
+    hung.route(poll_ws, hold_first)
+    admin_page(hung, ADMIN + "-realtime")
+    hung.wait_for_timeout(1800)
+    first = len(polls)
+    hung.evaluate("""() => {
+      let hidden = true;
+      Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
+      document.dispatchEvent(new Event('visibilitychange'));
+      hidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    hung.wait_for_timeout(3000)
+    check(first == 1 and held and len(polls) >= 3,
+          "realtime: a poll hanging across a hide/show doesn't stall the restarted board (%d before, %d after)"
+          % (first, len(polls)))
+    held[0].fulfill(content_type="application/json",
+                    body=json.dumps({"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:00:01"}}))
+    hung.close()
 
     # The poll carries the database's clock.
     data = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&since_id=999999999').then(r => r.json())")
