@@ -287,6 +287,7 @@
     b.score = score(b) + weight(e) * Math.pow(0.5, Math.max(0, clock - t) / HALF);
     b.scoreAt = clock;
     b.lastAt = Math.max(b.lastAt, t);
+    dirty = true;
     if (live && !still) {
       var kick = 60 + Math.random() * 60, dir = Math.random() * 2 * Math.PI;
       b.vx += Math.cos(dir) * kick;
@@ -301,6 +302,7 @@
   function remove(b) {
     bubbles.delete(b.id);
     board.removeChild(b.el);
+    dirty = true;
   }
 
   // Busy zips can flood the board: keep the highest scores.
@@ -325,6 +327,29 @@
         : clock - lastEvent < 10000 ? ' · active now' : ' · quiet for ' + ago(clock - lastEvent));
   }
 
+  // Reduced motion: no animation at all. Sizes snap and the board is packed
+  // biggest-first on a spiral out from the centre, redone only when activity
+  // changes it (or every 30 s, for decay) — so it changes in steps, never glides.
+  var dirty = true, packedAt = 0;
+  function fits(b, placed, w, h) {
+    if (b.x < b.r || b.y < b.r || b.x > w - b.r || b.y > h - b.r) { return false; }
+    return placed.every(function (p) {
+      var dx = b.x - p.x, dy = b.y - p.y, min = b.r + p.r + 6;
+      return dx * dx + dy * dy >= min * min;
+    });
+  }
+  function pack(list, w, h) {
+    var placed = [];
+    list.slice().sort(function (a, b) { return b.r - a.r || a.id - b.id; }).forEach(function (b) {
+      for (var k = 0, a = 0; k < 3000; k++, a += 0.25) {
+        b.x = w / 2 + 3 * a * Math.cos(a);
+        b.y = h / 2 + 3 * a * Math.sin(a);
+        if (fits(b, placed, w, h)) { break; }
+      }
+      placed.push(b);
+    });
+  }
+
   // One step: decay, sizes, motion, then draw. Decay uses the whole dt, so a
   // test can jump minutes ahead; motion is clamped to a short step.
   var statusAt = 0;
@@ -334,21 +359,32 @@
     var dt = Math.min(dtMs, 50) / 1000;
     var w = board.clientWidth, h = board.clientHeight;
     var list = Array.from(bubbles.values()), top = 4;
-    list.forEach(function (b) { b.s = score(b); top = Math.max(top, b.s); });
-    list.forEach(function (b) {
-      var gone = b.s < FLOOR || clock - b.lastAt > WINDOW;
-      var target = gone ? 0 : MIN_R + (MAX_R - MIN_R) * Math.sqrt(b.s / top);
-      b.r += (target - b.r) * Math.min(1, dt * 4 + (dtMs > 1000 ? 1 : 0));
-      if (gone && b.r < 2) { remove(b); b.dead = true; }
-    });
-    list = list.filter(function (b) { return !b.dead; });
+    var resize = !still || dirty || clock - packedAt >= 30000 || dtMs > 1000;
+    if (resize) {
+      list.forEach(function (b) { b.s = score(b); top = Math.max(top, b.s); });
+      list.forEach(function (b) {
+        var gone = b.s < FLOOR || clock - b.lastAt > WINDOW;
+        var target = gone ? 0 : MIN_R + (MAX_R - MIN_R) * Math.sqrt(b.s / top);
+        b.r = still ? target : b.r + (target - b.r) * Math.min(1, dt * 4 + (dtMs > 1000 ? 1 : 0));
+        if (gone && b.r < 2) { remove(b); b.dead = true; }
+      });
+      list = list.filter(function (b) { return !b.dead; });
+    }
+    if (still) {
+      if (resize) { pack(list, w, h); packedAt = clock; dirty = false; }
+    } else {
+      drift(list, dt, w, h);
+    }
+    draw(list, w, h);
+    if (clock - statusAt >= 1000 || dtMs > 1000) { statusAt = clock; showStatus(); }
+  }
+
+  function drift(list, dt, w, h) {
     list.forEach(function (b) {
       var ax = (w / 2 - b.x) * 0.4, ay = (h / 2 - b.y) * 0.4;
-      if (!still) {
-        b.heading += (Math.random() - 0.5) * dt * 3;
-        ax += Math.cos(b.heading) * 15;
-        ay += Math.sin(b.heading) * 15;
-      }
+      b.heading += (Math.random() - 0.5) * dt * 3;
+      ax += Math.cos(b.heading) * 15;
+      ay += Math.sin(b.heading) * 15;
       b.vx = (b.vx + ax * dt) * Math.exp(-2 * dt);
       b.vy = (b.vy + ay * dt) * Math.exp(-2 * dt);
       b.x += b.vx * dt;
@@ -368,6 +404,9 @@
         }
       }
     }
+  }
+
+  function draw(list, w, h) {
     list.forEach(function (b) {
       b.x = Math.min(Math.max(b.x, b.r), w - b.r);
       b.y = Math.min(Math.max(b.y, b.r), h - b.r);
@@ -378,7 +417,6 @@
       if (size > 140 && b.preview && !b.big) { b.big = true; b.img.src = b.preview; }
     });
     board.classList.toggle('gp-board-empty', list.length === 0);
-    if (clock - statusAt >= 1000 || dtMs > 1000) { statusAt = clock; showStatus(); }
   }
 
   var frame = null, prev = 0;
@@ -398,26 +436,37 @@
       });
   }
 
+  // Each (re)start is a generation: answers from an older one are dropped, so
+  // a seed or poll still in flight when the tab is re-shown can't double-count.
+  // Polling waits for a seed to set the cursor — since_id=0 would walk the
+  // whole table from its oldest row.
+  var gen = 0, ready = false;
+
   // The newest page, newest first: Show older from the top.
-  function seed() {
-    bubbles.forEach(remove);
-    guests.clear();
-    lastEvent = null;
+  function seed(mine) {
     return fetchEvents('before_id=' + Number.MAX_SAFE_INTEGER).then(function (events) {
+      if (mine !== gen) { return; }
+      bubbles.forEach(remove);
+      guests.clear();
+      lastEvent = null;
       events.forEach(function (e) { sinceId = Math.max(sinceId, e.id); });
       events.slice().reverse().forEach(function (e) { add(e, false); });
       cap();
       tick(0);
       showStatus();
+      ready = true;
+      schedule(1000);
     });
   }
 
   var busy = false, timer = null, empties = 0;
   function poll() {
-    if (busy) { return; }
+    if (busy || !ready) { return; }
     busy = true;
+    var mine = gen;
     fetchEvents('since_id=' + sinceId)
       .then(function (events) {
+        if (mine !== gen) { return 0; }
         events.forEach(function (e) {
           sinceId = Math.max(sinceId, e.id);
           add(e, true);
@@ -428,6 +477,7 @@
       .catch(function () { return 0; })
       .then(function (count) {
         busy = false;
+        if (!ready) { return; }
         if (count >= POLL) { poll(); return; }
         empties = count > 0 ? 0 : empties + 1;
         schedule(empties >= 3 ? 5000 : 1000);
@@ -437,10 +487,20 @@
     clearTimeout(timer);
     timer = document.hidden ? null : setTimeout(poll, ms);
   }
+  // A failed seed retries with backoff (1 s, 2 s, 4 s … 30 s) and never polls.
+  function begin(mine, failures) {
+    seed(mine).catch(function () {
+      if (mine !== gen) { return; }
+      status.textContent = 'Could not load activity — retrying…';
+      clearTimeout(timer);
+      timer = document.hidden ? null
+        : setTimeout(function () { begin(mine, failures + 1); }, Math.min(30000, 1000 * Math.pow(2, failures)));
+    });
+  }
   function start() {
     empties = 0;
-    seed().catch(function () { status.textContent = 'Could not load activity.'; })
-      .then(function () { schedule(1000); });
+    ready = false;
+    begin(++gen, 0);
   }
   // Hidden: stop. Shown again: start over from the newest rather than replay the gap.
   document.addEventListener('visibilitychange', function () {

@@ -8,6 +8,7 @@ then asserts on the rows that landed in piwigo_pulse_event.
 """
 import ipaddress
 import json
+import math
 import subprocess
 import sys
 import time
@@ -688,6 +689,58 @@ def realtime(ctx, sid, token, img, other_img, cat):
     check(len(ids) == 60 and 10 ** 6 not in ids, "realtime: a flood is capped at 60 bubbles, the weakest dropped (%d)" % len(ids))
     page.unroute(seed_ws)
     page.unroute(poll_ws)
+
+    # A failed seed retries with backoff and never polls from since_id=0.
+    seeds, polls = [], []
+    def flaky_seed(route):
+        seeds.append(route.request.url)
+        if len(seeds) <= 2:
+            route.abort()
+        else:
+            route.fulfill(content_type="application/json", body=json.dumps(
+                {"stat": "ok", "result": {"events": flood[5:6], "now": "2026-01-01 00:00:01"}}))
+    def count_poll(route):
+        polls.append(route.request.url)
+        empty(route)
+    page.route(seed_ws, flaky_seed)
+    page.route(poll_ws, count_poll)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1500)
+    retrying = "retrying" in page.inner_text("#gp-rt-status")
+    page.wait_for_timeout(4500)
+    check(retrying and len(seeds) == 3 and polls and all(u.endswith("since_id=%d" % flood[5]["id"]) for u in polls)
+          and len(page.evaluate(BUBBLES)) == 1,
+          "realtime: a failed seed retries, and polling starts only from the seeded cursor (%d seeds, polls %s)"
+          % (len(seeds), [u.split("since_id=")[-1] for u in polls]))
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # Reduced motion: a static packed layout — no gliding, no overlap, busiest in the middle.
+    still = ctx.new_page()
+    still.emulate_media(reduced_motion="reduce")
+    packed = [dict(flood[i], event="lightbox_view") for i in range(8) for _ in range(i + 1)]
+    for n, e in enumerate(packed):
+        e["id"] = 10 ** 9 + n
+    still.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": packed[::-1], "now": "2026-01-01 00:00:01"}})))
+    still.route(poll_ws, empty)
+    admin_page(still, ADMIN + "-realtime")
+    still.wait_for_function("gpRealtime.bubbles().length === 8", timeout=5000)
+    before = still.evaluate(BUBBLES)
+    still.wait_for_timeout(1500)
+    after = still.evaluate(BUBBLES)
+    size = still.evaluate("[document.getElementById('gp-board').clientWidth, document.getElementById('gp-board').clientHeight]")
+    def off_centre(b):
+        return math.hypot(b["x"] - size[0] / 2, b["y"] - size[1] / 2)
+    overlaps = [(p["id"], q["id"]) for i, p in enumerate(after) for q in after[i + 1:]
+                if math.hypot(p["x"] - q["x"], p["y"] - q["y"]) < p["r"] + q["r"]]
+    biggest = max(after, key=lambda b: b["r"])
+    def spots(bs):
+        return [(b["id"], b["x"], b["y"], b["r"]) for b in bs]
+    check(spots(before) == spots(after) and not overlaps and off_centre(biggest) == min(off_centre(b) for b in after),
+          "realtime: reduced motion holds a still, packed layout (moved=%s, overlaps=%s)"
+          % (spots(before) != spots(after), overlaps))
+    still.close()
 
     # The poll carries the database's clock.
     data = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&since_id=999999999').then(r => r.json())")
