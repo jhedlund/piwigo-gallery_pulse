@@ -6,29 +6,71 @@
 
 <div class="gp-wrap">
 
-{if $GP_TAB != 'live' && $GP_TAB != 'settings' && !isset($GP_SID)}
-<form method="get" action="admin.php" class="gp-filters">
+{if $GP_FILTERED || $GP_TAB == 'photo'}
+<form method="get" action="admin.php" class="gp-filters" id="gp-filters">
   <input type="hidden" name="page" value="plugin-gallery_pulse-{$GP_TAB}">
-  {if isset($GP_SORT)}<input type="hidden" name="sort" value="{$GP_SORT}">{/if}
+  <input type="hidden" name="f" value="1">
+  {if $GP_TAB == 'photos'}<input type="hidden" name="sort" value="{$GP_F.sort}"><input type="hidden" name="dir" value="{$GP_F.dir}">{/if}
   {if isset($GP_IMAGE_ID)}<input type="hidden" name="image_id" value="{$GP_IMAGE_ID}">{/if}
   <label>Period
-    <select name="days" onchange="this.form.submit()">
+    <select name="days" data-submit>
       {foreach from=$GP_PERIODS key=d item=label}
-      <option value="{$d}"{if $d == $GP_DAYS} selected{/if}>{$label}</option>
+      <option value="{$d}"{if !$GP_CUSTOM && $d == $GP_F.days} selected{/if}>{$label}</option>
       {/foreach}
+      <option value="custom"{if $GP_CUSTOM} selected{/if}>Date range…</option>
     </select>
   </label>
-  {if $GP_TAB == 'photos' || $GP_TAB == 'visitors'}
+  <span class="gp-range"{if !$GP_CUSTOM} hidden{/if}>
+    <label>From <input type="date" name="from" value="{$GP_F.from}"></label>
+    <label>To <input type="date" name="to" value="{$GP_F.to}"></label>
+  </span>
+  {if $GP_FILTERED}
   <label>Album
-    <select name="cat" onchange="this.form.submit()">
+    <select name="cat" data-submit>
       <option value="">All</option>
       {foreach from=$GP_ALBUMS key=id item=path}
-      <option value="{$id}"{if $id == $GP_CAT} selected{/if}>{$path|escape}</option>
+      <option value="{$id}"{if $id == $GP_F.cat} selected{/if}>{$path|escape}</option>
       {/foreach}
     </select>
   </label>
+  <details class="gp-multi">
+    <summary>Events: {if empty($GP_F.ev)}all{else}{$GP_EV_LABEL|escape}{/if}</summary>
+    <div>
+      {foreach from=$GP_EVENT_OPTIONS key=name item=on}
+      <label><input type="checkbox" name="ev[]" value="{$name}"{if $on} checked{/if}> {$name}</label>
+      {/foreach}
+      <p class="gp-detail">None ticked = all events.</p>
+    </div>
+  </details>
+  <label>Guest
+    <input type="search" name="guest" value="{$GP_F.guest|escape}" list="gp-guests" placeholder="anyone" size="16" title="A visitor's id as shown (4+ characters), a username, or &quot;no beacon&quot;">
+  </label>
+  <datalist id="gp-guests">
+    {foreach from=$GP_GUESTS item=g}<option value="{$g|escape}">{/foreach}
+  </datalist>
   {/if}
+  <button type="submit" class="buttonLike">Apply</button>
+  {if $GP_FILTERED && $GP_RESETTABLE}<a href="{$GP_BASE}&amp;reset=1" class="gp-reset">Reset filters</a>{/if}
 </form>
+{footer_script}
+(function () {
+  var form = document.getElementById('gp-filters');
+  var range = form.querySelector('.gp-range');
+  form.querySelectorAll('select[data-submit]').forEach(function (sel) {
+    sel.addEventListener('change', function () {
+      if (sel.name === 'days') {
+        if (sel.value === 'custom') {
+          range.hidden = false;
+          form.querySelector('input[name=from]').focus();
+          return;
+        }
+        range.hidden = true;
+      }
+      form.submit();
+    });
+  });
+})();
+{/footer_script}
 {/if}
 
 {* Hover preview: one shared popup to the right of the thumbnail. *}
@@ -69,17 +111,77 @@
   });
   window.addEventListener('scroll', place, true);
 })();
+
+{* Click a column heading to sort; again to reverse. A cell's data-sort, when
+   present, is what it sorts by. Blank cells stay at the bottom. Each table's
+   sort is remembered in this browser. *}
+(function () {
+  function value(tr, col) {
+    var td = tr.cells[col];
+    if (!td) { return ''; }
+    return td.hasAttribute('data-sort') ? td.getAttribute('data-sort') : td.textContent.trim();
+  }
+  function numeric(v) { return v !== '' && !isNaN(Number(v)); }
+  function compare(a, b) {
+    if (numeric(a) && numeric(b)) { return Number(a) - Number(b); }
+    return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+  }
+  function apply(table, col, dir) {
+    var tbody = table.tBodies[0];
+    var rows = Array.prototype.map.call(tbody.rows, function (tr, i) { return { tr: tr, v: value(tr, col), i: i }; });
+    rows.sort(function (x, y) {
+      if (x.v === '' || y.v === '') { return x.v === y.v ? x.i - y.i : x.v === '' ? 1 : -1; }
+      return (dir === 'asc' ? compare(x.v, y.v) : compare(y.v, x.v)) || x.i - y.i;
+    });
+    rows.forEach(function (r) { tbody.appendChild(r.tr); });
+    Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th, i) {
+      th.classList.toggle('gp-sorted-asc', i === col && dir === 'asc');
+      th.classList.toggle('gp-sorted-desc', i === col && dir === 'desc');
+    });
+  }
+  function saved(table) {
+    try {
+      var m = /^(\d+):(asc|desc)$/.exec(localStorage.getItem('gp-sort:' + table.id) || '');
+      return m ? { col: parseInt(m[1], 10), dir: m[2] } : null;
+    } catch (e) { return null; }
+  }
+  // Re-sort after rows are added (Live); false when the table is unsorted.
+  window.gpResort = function (table) {
+    var s = saved(table);
+    if (!s) { return false; }
+    apply(table, s.col, s.dir);
+    return true;
+  };
+  document.querySelectorAll('table.gp-sortable').forEach(function (table) {
+    Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th, col) {
+      th.addEventListener('click', function () {
+        var s = saved(table), dir;
+        if (s && s.col === col) {
+          dir = s.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          // Numbers and times start with the biggest or latest, text from A.
+          var first = '';
+          Array.prototype.some.call(table.tBodies[0].rows, function (tr) { first = value(tr, col); return first !== ''; });
+          dir = numeric(first) || th.hasAttribute('data-desc') ? 'desc' : 'asc';
+        }
+        try { localStorage.setItem('gp-sort:' + table.id, col + ':' + dir); } catch (e) {}
+        apply(table, col, dir);
+      });
+    });
+    window.gpResort(table);
+  });
+})();
 {/footer_script}
 
 {* ------------------------------------------------------------------ Live *}
 {if $GP_TAB == 'live'}
-<p class="gp-note">Newest first, updated within a second while guests are active (every 5 seconds when quiet); opens with the latest {$GP_LIVE_PAGE} events, and Show older pages further back. Admin sessions are not tracked — open a share link in a private window to see yourself here.</p>
-<table class="table2 gp-table" id="gp-live">
-  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Album</th><th>Event</th><th>Photo</th><th>IP</th><th>Device</th></tr></thead>
+<p class="gp-note">Newest first, updated within a second while guests are active (every 5 seconds when quiet); opens with the latest {$GP_LIVE_PAGE} events, and Show older pages further back. New events that don't match the filters aren't shown. Admin sessions are not tracked — open a share link in a private window to see yourself here.</p>
+<table class="table2 gp-table gp-sortable" id="gp-live">
+  <thead><tr><th data-desc>Time ({$GP_TZ})</th><th>Guest</th><th>Album</th><th>Event</th><th>Photo</th><th>IP</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_EVENTS item=e}
     <tr data-id="{$e.id}">
-      <td>{$e.occurred_at_display}</td>
+      <td data-sort="{$e.occurred_at}">{$e.occurred_at_display}</td>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$e.sid}">{$e.guest}</a></td>
       <td class="gp-album">{if $e.album_url}<a href="{$e.album_url|escape}">{$e.album_path|escape}</a>{/if}</td>
       <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}{if $e.value_label} <span class="gp-detail">{$e.value_label|escape}</span>{/if}</td>
@@ -93,7 +195,8 @@
 <p><button type="button" class="buttonLike" id="gp-older"{if !$GP_LIVE_MORE} hidden{/if}>Show older</button></p>
 {footer_script}
 (function () {
-  var tbody = document.querySelector('#gp-live tbody');
+  var table = document.getElementById('gp-live');
+  var tbody = table.tBodies[0];
   var olderBtn = document.getElementById('gp-older');
   var PAGE = {$GP_LIVE_PAGE}, POLL = {$GP_LIVE_POLL}, MAX_ROWS = {$GP_LIVE_MAX_ROWS};
   // Rows are shown by occurrence time, so the first and last rows aren't
@@ -125,7 +228,7 @@
     var tr = document.createElement('tr');
     tr.setAttribute('data-id', e.id);
     tr.className = 'gp-new';
-    cell(tr, e.occurred_at_display);
+    cell(tr, e.occurred_at_display).setAttribute('data-sort', e.occurred_at);
     var a = document.createElement('a');
     a.href = visitorsUrl + e.sid;
     a.textContent = e.guest;
@@ -182,6 +285,11 @@
     return tr;
   }
 
+  function newestFirst(a, b) {
+    var ta = a.cells[0].getAttribute('data-sort'), tb = b.cells[0].getAttribute('data-sort');
+    return ta < tb ? 1 : ta > tb ? -1 : b.getAttribute('data-id') - a.getAttribute('data-id');
+  }
+
   var busy = false;
   function poll() {
     if (busy) { return; }
@@ -199,18 +307,19 @@
           sinceId = Math.max(sinceId, e.id);
         });
         // A tab left open for days stays responsive; trimmed rows can be paged
-        // back. Rows are in time order, so a trimmed row can have a higher id
-        // than one kept: page back from above every trimmed id, and Show older
-        // skips the rows still on screen.
+        // back. The oldest rows go, whatever the table is sorted by. A trimmed
+        // row can have a higher id than one kept: page back from above every
+        // trimmed id, and Show older skips the rows still on screen.
         if (tbody.children.length > cap) {
           var maxTrimmed = 0;
-          while (tbody.children.length > cap) {
-            maxTrimmed = Math.max(maxTrimmed, parseInt(tbody.lastChild.getAttribute('data-id'), 10));
-            tbody.removeChild(tbody.lastChild);
-          }
+          Array.prototype.slice.call(tbody.children).sort(newestFirst).slice(cap).forEach(function (tr) {
+            maxTrimmed = Math.max(maxTrimmed, parseInt(tr.getAttribute('data-id'), 10));
+            tbody.removeChild(tr);
+          });
           minId = Math.max(minId, maxTrimmed + 1);
           olderBtn.hidden = false;
         }
+        if (events.length) { window.gpResort(table); }
         return data.result.events.length;
       })
       .catch(function () { return 0; })
@@ -255,6 +364,7 @@
           tbody.appendChild(tr);
         });
         cap = Math.max(cap, tbody.children.length);
+        window.gpResort(table);
         olderBtn.hidden = data.result.events.length < PAGE;
       })
       .catch(function () {})
@@ -275,18 +385,18 @@
 {if empty($GP_PHOTOS)}
 <p>No photo activity in this period.</p>
 {else}
-<table class="table2 gp-table">
+{if count($GP_PHOTOS) >= $GP_ROWS}<p class="gp-note">Showing the top {$GP_ROWS} by the sorted column.</p>{/if}
+<table class="table2 gp-table" id="gp-photos">
   <thead><tr>
-    <th>Photo</th>
-    {foreach from=['views'=>'Views','page_views'=>'Photo page','guests'=>'Guests','dwell'=>'Dwell (total s)','zooms'=>'Zooms','max_zoom'=>'Max zoom','saves'=>'Save intent','downloads'=>'Downloads'] key=k item=label}
-    <th>{if $k == $GP_SORT}<b>{$label} &darr;</b>{else}<a href="{$GP_BASE}&amp;days={$GP_DAYS}{if $GP_CAT}&amp;cat={$GP_CAT}{/if}&amp;sort={$k}">{$label}</a>{/if}</th>
+    {foreach from=$GP_SORTS key=k item=label}
+    {if $k == $GP_F.sort}{assign var=next value=($GP_F.dir == 'asc') ? 'desc' : 'asc'}{else}{assign var=next value=($k == 'name') ? 'asc' : 'desc'}{/if}
+    <th class="{if $k == $GP_F.sort}gp-sorted-{$GP_F.dir}{/if}"><a href="{$GP_BASE}&amp;{$GP_QUERY|escape}&amp;sort={$k}&amp;dir={$next}">{$label}</a></th>
     {/foreach}
-    <th>Avg dwell (s)</th>
   </tr></thead>
   <tbody>
   {foreach from=$GP_PHOTOS item=p}
     <tr>
-      <td class="gp-photo">{if $p.thumb}<a href="{$p.detail_url|escape}&amp;days={$GP_DAYS}"><img src="{$p.thumb}" data-preview="{$p.preview}" alt=""> {$p.image_name|escape}</a>{else}#{$p.image_id}{/if}</td>
+      <td class="gp-photo">{if $p.thumb}<a href="{$p.detail_url|escape}&amp;{$GP_PERIOD_QUERY|escape}"><img src="{$p.thumb}" data-preview="{$p.preview}" alt=""> {$p.image_name|escape}</a>{else}#{$p.image_id}{/if}</td>
       <td>{$p.views}</td>
       <td>{$p.page_views}</td>
       <td>{$p.guests}</td>
@@ -305,7 +415,7 @@
 
 {* ----------------------------------------------------------- Photo detail *}
 {if $GP_TAB == 'photo'}
-<p><a href="{$GP_ADMIN}-photos&amp;days={$GP_DAYS}">&larr; All photos</a></p>
+<p><a href="{$GP_ADMIN}-photos">&larr; All photos</a></p>
 {if empty($GP_PHOTO)}
 <p>Photo not found.</p>
 {else}
@@ -340,18 +450,18 @@
 
 {if !empty($GP_PHOTO.guests)}
 <h4>Guests</h4>
-<table class="table2 gp-table">
-  <thead><tr><th>Guest</th><th>Link</th><th>Device</th><th>Last seen ({$GP_TZ})</th><th>Views</th><th>Dwell (s)</th><th>Max zoom</th><th>Save intent</th><th>Downloads</th></tr></thead>
+<table class="table2 gp-table gp-sortable" id="gp-photo-guests">
+  <thead><tr><th>Guest</th><th>Link</th><th>Device</th><th data-desc>Last seen ({$GP_TZ})</th><th>Views</th><th>Dwell (s)</th><th>Max zoom</th><th>Save intent</th><th>Downloads</th></tr></thead>
   <tbody>
   {foreach from=$GP_PHOTO.guests item=g}
     <tr>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$g.sid}">{$g.guest}</a></td>
       <td>{$g.link_name|escape}</td>
       <td>{$g.device}</td>
-      <td>{$g.last_seen_display}</td>
+      <td data-sort="{$g.last_seen}">{$g.last_seen_display}</td>
       <td>{$g.views}</td>
       <td>{$g.dwell_total}</td>
-      <td>{if $g.max_zoom}{$g.max_zoom}&times;{/if}</td>
+      <td data-sort="{$g.max_zoom}">{if $g.max_zoom}{$g.max_zoom}&times;{/if}</td>
       <td>{$g.saves}</td>
       <td>{$g.downloads}</td>
     </tr>
@@ -362,12 +472,12 @@
 
 {if !empty($GP_PHOTO.timeline)}
 <h4>Events</h4>
-<table class="table2 gp-table">
-  <thead><tr><th>Time ({$GP_TZ})</th><th>Guest</th><th>Link</th><th>Event</th><th>IP</th><th>Device</th></tr></thead>
+<table class="table2 gp-table gp-sortable" id="gp-photo-events">
+  <thead><tr><th data-desc>Time ({$GP_TZ})</th><th>Guest</th><th>Link</th><th>Event</th><th>IP</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_PHOTO.timeline item=e}
     <tr>
-      <td>{$e.occurred_at_display}</td>
+      <td data-sort="{$e.occurred_at}">{$e.occurred_at_display}</td>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$e.sid}">{$e.guest}</a></td>
       <td>{$e.link_name|escape}</td>
       <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}{if $e.value_label} <span class="gp-detail">{$e.value_label|escape}</span>{/if}</td>
@@ -389,12 +499,12 @@
 {if empty($GP_TIMELINE)}
 <p>No events for this guest.</p>
 {else}
-<table class="table2 gp-table">
-  <thead><tr><th>Time ({$GP_TZ})</th><th>Link</th><th>Event</th><th>Photo / album</th><th>IP</th><th>Device</th></tr></thead>
+<table class="table2 gp-table gp-sortable" id="gp-timeline">
+  <thead><tr><th data-desc>Time ({$GP_TZ})</th><th>Link</th><th>Event</th><th>Photo / album</th><th>IP</th><th>Device</th></tr></thead>
   <tbody>
   {foreach from=$GP_TIMELINE item=e}
     <tr>
-      <td>{$e.occurred_at_display}</td>
+      <td data-sort="{$e.occurred_at}">{$e.occurred_at_display}</td>
       <td>{$e.link_name|escape}</td>
       <td>{$e.event}{if $e.detail} <span class="gp-detail">{$e.detail}</span>{/if}{if $e.value_label} <span class="gp-detail">{$e.value_label|escape}</span>{/if}</td>
       <td class="gp-photo">{if $e.thumb}<a href="{$e.detail_url|escape}"><img src="{$e.thumb}" data-preview="{$e.preview}" alt=""> {$e.image_name|escape}</a>{elseif $e.category_name}{$e.category_name|escape}{/if}</td>
@@ -406,20 +516,22 @@
 </table>
 {/if}
 {else}
-<p class="gp-note">One row per browser (a first-party cookie kept 30 days), named by username when a registered user was logged in. "no beacon" collects downloads from browsers that never ran the tracking script. The share link each event came through is on the visitor's timeline.</p>
+<p class="gp-note">One row per browser (a first-party cookie kept 30 days), named by username when a registered user was logged in. "no beacon" collects downloads from browsers that never ran the tracking script. Albums are listed most recently viewed first; IP is the address the visitor was last seen from. The share link each event came through is on the visitor's timeline.</p>
 {if empty($GP_VISITORS)}
 <p>No visitors in this period.</p>
 {else}
-<table class="table2 gp-table">
-  <thead><tr><th>Visitor</th><th>Albums</th><th>Device</th><th>First seen ({$GP_TZ})</th><th>Last seen ({$GP_TZ})</th><th>Photos</th><th>Dwell (s)</th><th>Zooms</th><th>Save intent</th><th>Downloads</th></tr></thead>
+{if count($GP_VISITORS) >= $GP_ROWS}<p class="gp-note">Showing the {$GP_ROWS} most recently active.</p>{/if}
+<table class="table2 gp-table gp-sortable" id="gp-visitors">
+  <thead><tr><th>Visitor</th><th>Albums (latest first)</th><th>IP (last seen)</th><th>Device</th><th data-desc>First seen ({$GP_TZ})</th><th data-desc>Last seen ({$GP_TZ})</th><th>Photos</th><th>Dwell (s)</th><th>Zooms</th><th>Save intent</th><th>Downloads</th></tr></thead>
   <tbody>
   {foreach from=$GP_VISITORS item=v}
     <tr>
       <td><a href="{$GP_ADMIN}-visitors&amp;sid={$v.sid}">{if $v.username}{$v.username|escape}{else}{$v.guest}{/if}</a></td>
-      <td title="{$v.albums_all|escape}">{$v.album_first|escape}{if $v.albums_more} <span class="gp-detail">+{$v.albums_more} more</span>{/if}</td>
+      <td class="gp-albums">{foreach from=$v.albums_shown item=a}<div>{$a|escape}</div>{/foreach}{if $v.albums_more}<div class="gp-detail" title="{$v.albums_rest|escape}">+{$v.albums_more} more</div>{/if}</td>
+      <td class="gp-ip">{$v.last_ip|escape|replace:':':':<wbr>'}{if $v.ip_location}<div class="gp-detail">{$v.ip_location|escape}</div>{/if}</td>
       <td>{$v.device}</td>
-      <td>{$v.first_seen_display}</td>
-      <td>{$v.last_seen_display}</td>
+      <td data-sort="{$v.first_seen}">{$v.first_seen_display}</td>
+      <td data-sort="{$v.last_seen}">{$v.last_seen_display}</td>
       <td>{$v.photos}</td>
       <td>{$v.dwell_total}</td>
       <td>{$v.zooms}</td>
@@ -439,12 +551,12 @@
 {if empty($GP_ALBUM_STATS)}
 <p>No activity in this period.</p>
 {else}
-<table class="table2 gp-table">
-  <thead><tr><th>Album</th><th>Via</th><th>Guests</th><th>Album views</th><th>Views</th><th>Photo page</th><th>Zooms</th><th>Save intent</th><th>Downloads</th><th>Last activity ({$GP_TZ})</th><th></th></tr></thead>
+<table class="table2 gp-table gp-sortable" id="gp-albums">
+  <thead><tr><th>Album</th><th>Via</th><th>Guests</th><th>Album views</th><th>Views</th><th>Photo page</th><th>Zooms</th><th>Save intent</th><th>Downloads</th><th data-desc>Last activity ({$GP_TZ})</th><th></th></tr></thead>
   <tbody>
   {foreach from=$GP_ALBUM_STATS item=a}
     <tr>
-      <td>{if $a.album_name}<a href="{$GP_ADMIN}-photos&amp;days={$GP_DAYS}&amp;cat={$a.category_id}">{$a.album_name|escape}</a>{elseif $a.category_id}#{$a.category_id} <span class="gp-detail">deleted</span>{else}<i>Unknown</i>{/if}</td>
+      <td>{if $a.album_name}<a href="{$GP_ADMIN}-photos&amp;{$GP_QUERY_NOCAT|escape}&amp;cat={$a.category_id}">{$a.album_name|escape}</a>{elseif $a.category_id}#{$a.category_id} <span class="gp-detail">deleted</span>{else}<i>Unknown</i>{/if}</td>
       <td class="gp-detail">{$a.via|escape}</td>
       <td>{$a.guests}</td>
       <td>{$a.album_views}</td>
@@ -453,8 +565,8 @@
       <td>{$a.zooms}</td>
       <td>{$a.saves}</td>
       <td>{$a.downloads}</td>
-      <td>{$a.last_seen_display}</td>
-      <td>{if $a.album_name}<a href="{$GP_ADMIN}-visitors&amp;days={$GP_DAYS}&amp;cat={$a.category_id}">Visitors</a>{/if}</td>
+      <td data-sort="{$a.last_seen}">{$a.last_seen_display}</td>
+      <td>{if $a.album_name}<a href="{$GP_ADMIN}-visitors&amp;{$GP_QUERY_NOCAT|escape}&amp;cat={$a.category_id}">Visitors</a>{/if}</td>
     </tr>
   {/foreach}
   </tbody>

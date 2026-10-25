@@ -61,58 +61,100 @@ foreach ($tabs as $code => $label)
 $tabsheet->select($tab == 'photo' ? 'photos' : $tab);
 $tabsheet->assign();
 
-$retention = gallery_pulse_retention_days();
-$periods = array(1 => 'Last 24 hours', 7 => 'Last 7 days', 30 => 'Last 30 days');
-if ($retention > 365)
+// Filters (Live, Photos, Visitors, Albums) stick per tab: a URL carrying any
+// filter value sets the tab's whole filter and saves it; a bare tab link brings
+// back the last one. The visitor timeline and photo detail aren't filtered
+// tabs; the detail takes its period from the link.
+$filter_keys = array('f', 'days', 'from', 'to', 'cat', 'ev', 'guest', 'sort', 'dir');
+$filtered = in_array($tab, array('live', 'photos', 'visitors', 'albums')) && !isset($_GET['sid']);
+$albums = $filtered ? gallery_pulse_album_options() : array();
+$input = array();
+if ($filtered && isset($_GET['reset']))
 {
-  $periods[365] = 'Last 365 days';
+  gallery_pulse_save_filter($tab, null);
 }
-$periods[$retention] = 'All (' . $retention . ' days)';
-$days = isset($_GET['days']) && isset($periods[(int)$_GET['days']]) ? (int)$_GET['days'] : ($tab == 'photo' ? $retention : 30);
-
-// Album filter (Photos, Visitors): an album includes its sub-albums.
-$albums = array();
-$cat = null;
-$cat_ids = null;
-if ($tab == 'photos' || $tab == 'visitors')
+elseif (!$filtered || count(array_intersect($filter_keys, array_keys($_GET))) > 0)
 {
-  $albums = gallery_pulse_album_options();
-  $cat = isset($_GET['cat']) && isset($albums[(int)$_GET['cat']]) ? (int)$_GET['cat'] : null;
-  $cat_ids = $cat === null ? null : array_merge(array($cat), array_map('intval', get_subcat_ids(array($cat))));
+  $input = $_GET;
+  if (isset($input['guest']) && is_string($input['guest']))
+  {
+    $input['guest'] = stripslashes($input['guest']); // Piwigo adds slashes to $_GET
+  }
+}
+else
+{
+  $input = gallery_pulse_saved_filter($tab);
+}
+$state = gallery_pulse_filter_state($input, $tab, $filtered ? $albums : null);
+
+// Photos sorts on the server (it shows the top rows of a sort); the sort
+// sticks with the filter.
+$photo_sorts = gallery_pulse_photo_sorts();
+$state['sort'] = isset($input['sort']) && is_string($input['sort']) && isset($photo_sorts[$input['sort']]) ? $input['sort'] : 'views';
+$state['dir'] = isset($input['dir']) && $input['dir'] === 'asc' ? 'asc' : 'desc';
+if ($filtered && !empty($input) && $input !== gallery_pulse_saved_filter($tab))
+{
+  gallery_pulse_save_filter($tab, $state);
 }
 
+$query = gallery_pulse_filter_query($state);
 $template->assign(array(
   'GP_TAB' => $tab,
   'GP_BASE' => GALLERY_PULSE_ADMIN . '-' . $tab,
   'GP_ADMIN' => GALLERY_PULSE_ADMIN,
   'GP_PATH' => GALLERY_PULSE_PATH,
-  'GP_PERIODS' => $periods,
-  'GP_DAYS' => $days,
+  'GP_PERIODS' => gallery_pulse_periods(),
+  'GP_F' => $state,
+  'GP_FILTERED' => $filtered,
+  // Anything off the tab's default, period and Photos sort included: Reset is
+  // offered so a sticky filter isn't forgotten.
+  'GP_RESETTABLE' => $state != array_merge(gallery_pulse_filter_state(array(), $tab), array('sort' => 'views', 'dir' => 'desc')),
+  'GP_QUERY' => $query,
+  // The period alone, for links into the photo detail.
+  'GP_PERIOD_QUERY' => gallery_pulse_filter_query(array_merge($state, array('cat' => null, 'ev' => array(), 'guest' => ''))),
+  // Everything but the album, for an Albums row's links into Photos and Visitors.
+  'GP_QUERY_NOCAT' => gallery_pulse_filter_query(array_merge($state, array('cat' => null))),
+  'GP_CUSTOM' => $state['days'] === 'custom',
+  'GP_EV_LABEL' => implode(', ', $state['ev']),
   'GP_ALBUMS' => $albums,
-  'GP_CAT' => $cat,
-  'GP_RETENTION' => $retention,
+  'GP_EVENT_OPTIONS' => array_map(function ($n) use ($state) { return in_array($n, $state['ev'], true); },
+    array_combine(gallery_pulse_event_names(), gallery_pulse_event_names())),
+  'GP_GUESTS' => $filtered ? gallery_pulse_guest_suggestions() : array(),
+  'GP_RETENTION' => gallery_pulse_retention_days(),
   'GP_TZ' => gallery_pulse_timezone_label(),
 ));
 
 switch ($tab)
 {
   case 'live':
-    $events = gallery_pulse_recent_events(0, GALLERY_PULSE_LIVE_PAGE);
+    $events = gallery_pulse_recent_events($state, 0, GALLERY_PULSE_LIVE_PAGE);
     $template->assign(array(
       'GP_EVENTS' => $events,
       'GP_LIVE_PAGE' => GALLERY_PULSE_LIVE_PAGE,
       'GP_LIVE_MORE' => count($events) >= GALLERY_PULSE_LIVE_PAGE,
       'GP_LIVE_POLL' => GALLERY_PULSE_LIVE_POLL,
       'GP_LIVE_MAX_ROWS' => GALLERY_PULSE_LIVE_MAX_ROWS,
-      'GP_WS' => get_root_url() . 'ws.php?format=json&method=galleryPulse.live',
+      'GP_WS' => get_root_url() . 'ws.php?format=json&method=galleryPulse.live&filter='
+        . rawurlencode(json_encode(array_diff_key($state, array('sort' => 1, 'dir' => 1)))),
     ));
     break;
 
   case 'photos':
-    $sort = isset($_GET['sort']) && is_string($_GET['sort']) && array_key_exists($_GET['sort'], gallery_pulse_photo_sorts()) ? $_GET['sort'] : 'views';
     $template->assign(array(
-      'GP_SORT' => $sort,
-      'GP_PHOTOS' => gallery_pulse_photo_stats($days, $cat_ids, $sort),
+      'GP_SORTS' => array(
+        'name' => 'Photo',
+        'views' => 'Views',
+        'page_views' => 'Photo page',
+        'guests' => 'Guests',
+        'dwell' => 'Dwell (total s)',
+        'zooms' => 'Zooms',
+        'max_zoom' => 'Max zoom',
+        'saves' => 'Save intent',
+        'downloads' => 'Downloads',
+        'dwell_avg' => 'Avg dwell (s)',
+      ),
+      'GP_PHOTOS' => gallery_pulse_photo_stats($state, $state['sort'], $state['dir']),
+      'GP_ROWS' => GALLERY_PULSE_TABLE_ROWS,
     ));
     break;
 
@@ -120,7 +162,7 @@ switch ($tab)
     $image_id = isset($_GET['image_id']) ? (int)$_GET['image_id'] : 0;
     $template->assign(array(
       'GP_IMAGE_ID' => $image_id,
-      'GP_PHOTO' => $image_id > 0 ? gallery_pulse_photo_detail($image_id, $days) : null,
+      'GP_PHOTO' => $image_id > 0 ? gallery_pulse_photo_detail($image_id, $state) : null,
     ));
     break;
 
@@ -135,12 +177,15 @@ switch ($tab)
     }
     else
     {
-      $template->assign('GP_VISITORS', gallery_pulse_visitors($days, $cat_ids));
+      $template->assign(array(
+        'GP_VISITORS' => gallery_pulse_visitors($state),
+        'GP_ROWS' => GALLERY_PULSE_TABLE_ROWS,
+      ));
     }
     break;
 
   case 'albums':
-    $template->assign('GP_ALBUM_STATS', gallery_pulse_album_stats($days));
+    $template->assign('GP_ALBUM_STATS', gallery_pulse_album_stats($state));
     break;
 
   case 'settings':

@@ -179,6 +179,40 @@ def autoplay(p, link):
     check(not any(r[4] == "dwell" and r[2] in auto_imgs for r in rows), "autoplay: no dwell for slideshow slides")
 
 
+# Date.now() runs __skew ms ahead, so minutes pass without waiting for them.
+SKEW = "window.__skew = 0; const realNow = Date.now; Date.now = () => realNow() + window.__skew;"
+
+
+def dwell_pause(p, link):
+    """Dwell stops 60 s after the last input and pauses while the window is out of focus."""
+    def one_slide(during):
+        since = max_id()
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        page.add_init_script(SKEW)
+        page.goto(link)
+        page.locator("#thumbnails a[data-index]").first.click()
+        page.wait_for_selector(".pswp--open")
+        page.wait_for_timeout(1000)
+        page.evaluate(during)
+        page.wait_for_timeout(300)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        page.goto("about:blank")
+        rows = wait_rows(since, lambda r: any(x[4] == "dwell" for x in r))
+        page.close()
+        return [float(r[5]) for r in rows if r[4] == "dwell"]
+
+    browser = p.chromium.launch()
+    control = one_slide("window.__skew += 30000")
+    check(len(control) == 1 and 30 <= control[0] < 40, "dwell: 30 s with no input still counts in full (%s)" % control)
+    idle = one_slide("window.__skew += 300000")
+    check(len(idle) == 1 and 60 <= idle[0] < 70, "dwell: 5 idle minutes stop counting 60 s after the last input (%s)" % idle)
+    blur = one_slide("window.dispatchEvent(new Event('blur')); window.__skew += 300000; "
+                     "window.dispatchEvent(new Event('focus'))")
+    check(len(blur) == 1 and blur[0] < 10, "dwell: 5 minutes out of focus are not counted (%s)" % blur)
+    browser.close()
+
+
 def page_context(p, link, token):
     since = max_id()
     html = urllib.request.urlopen(link).read().decode()
@@ -702,16 +736,17 @@ def geoip_setting(page, token, img, cat):
 
 
 def upgrade():
-    """Activating 1.5 over a 1.4 table adds the ip column; old rows stay intact, with no IP."""
+    """Activating 1.6 over a 1.4 table adds the ip column; old rows stay intact, with no IP."""
     snap = ("SELECT COUNT(*), MD5(GROUP_CONCAT(CONCAT_WS('|', id, occurred_at, sid, event, IFNULL(value,''), "
             "IFNULL(detail,''), IFNULL(device,'')) ORDER BY id)) FROM piwigo_pulse_event")
-    sql("ALTER TABLE piwigo_pulse_event DROP COLUMN ip")
+    sql("ALTER TABLE piwigo_pulse_event DROP COLUMN ip, DROP INDEX IF EXISTS k_cat")
     sql("UPDATE piwigo_plugins SET version = '1.4.0' WHERE id = 'gallery_pulse'")
     before = sql(snap)
     urllib.request.urlopen(BASE + "index.php").read()
     cols = [r[0] for r in sql("SHOW COLUMNS FROM piwigo_pulse_event")]
-    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.5.0"]], "upgrade: plugin updated to 1.5.0")
+    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.6.0"]], "upgrade: plugin updated to 1.6.0")
     check(cols[-2:] == ["device", "ip"], "upgrade: ip column added after device (%s)" % cols)
+    check(sql("SHOW INDEX FROM piwigo_pulse_event WHERE Key_name = 'k_cat'") != [], "upgrade: album index added")
     check(sql(snap) == before and sql("SELECT COUNT(*) FROM piwigo_pulse_event WHERE ip IS NOT NULL") == [["0"]],
           "upgrade: old rows intact, IP blank (%s)" % before)
 
@@ -734,7 +769,7 @@ def live_trim(ctx, sid, token, img, cat):
     sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
         "VALUES (NOW(), '%s', '%s', %s, %s, 'fullscreen')" % (sid, token, img, cat))
     new_id = sql("SELECT MAX(id) FROM piwigo_pulse_event")[0][0]
-    page.wait_for_selector("#gp-live tr[data-id='%s']" % new_id, timeout=5000)
+    page.wait_for_selector("#gp-live tr[data-id='%s']" % new_id, timeout=9000)
     page.wait_for_timeout(1500)
     after = page.locator("#gp-live tbody tr").count()
     check(loaded > 2000 and after == loaded, "live trim: poll keeps rows Show older loaded (%d -> %d)" % (loaded, after))
@@ -805,6 +840,205 @@ def time_zone(page):
     sql("DELETE FROM piwigo_config WHERE param = 'gallery_pulse_timezone'")
 
 
+VISITOR_ROWS = "trs => trs.map(t => [...t.cells].map(c => c.innerText.trim()))"
+
+
+def visitor_row(page, label):
+    rows = page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)
+    return next((r for r in rows if r[0] == label), None)
+
+
+def filters(ctx, token, top_id, sub_id, top_img, sub_img):
+    """1.6: per-tab sticky filters (period/range, album, events, guest), Visitors last IP and recent albums, sorting."""
+    since = max_id()
+    sid = "9" * 32
+    extra = [901, 902, 903]
+    for i, cid in enumerate(extra):
+        sql("INSERT INTO piwigo_categories (id, name, uppercats, global_rank, status) VALUES (%d, 'GP Extra %d', '%d', '%d', 'public')"
+            % (cid, i + 1, cid, cid))
+    # Most events in the sub-album, but the top album was viewed last; then three
+    # older extra albums. The newest event has no IP, so "last seen" is the one before.
+    rows = ["(NOW() - INTERVAL %d MINUTE, '%s', %s, %s, 'lightbox_view', '2001:218::1')" % (40 + n, sid, sub_img, sub_id) for n in range(5)]
+    rows += ["(NOW() - INTERVAL %d MINUTE, '%s', %s, %d, 'lightbox_view', '172.18.0.1')" % (60 + i, sid, top_img, cid) for i, cid in enumerate(extra)]
+    rows.append("(NOW() - INTERVAL 10 MINUTE, '%s', %s, %s, 'zoom', '81.2.69.160')" % (sid, top_img, top_id))
+    rows.append("(NOW() - INTERVAL 5 MINUTE, '%s', NULL, NULL, 'page_view', NULL)" % sid)
+    # 23:30 New York on 14 Jan = 04:30 UTC on the 15th: a date range is in display time.
+    rows.append("('2026-01-15 04:30:00', '%s', %s, %s, 'fullscreen', NULL)" % (sid, top_img, top_id))
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, category_id, event, ip) VALUES " + ", ".join(rows))
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, user_id, image_id, category_id, event) VALUES "
+        "(NOW() - INTERVAL 3 MINUTE, '%s', 1, %s, %s, 'save_intent')" % ("8" * 32, top_img, top_id))
+
+    page = ctx.new_page()
+    for tab in ("live", "photos", "visitors", "albums"):
+        admin_page(page, ADMIN + "-" + tab + "&reset=1")
+
+    # Visitors: latest album first, three inline, the rest behind "+N more"; last non-blank IP.
+    _, clean = admin_page(page, ADMIN + "-visitors&days=1")
+    r = visitor_row(page, sid[:8])
+    albums = r[1].split("\n") if r else []
+    check(clean and albums[:2] == ["Test Match", "Test Match / Second Half"] and albums[2] == "GP Extra 1" and albums[3] == "+2 more",
+          "visitors: albums most recently viewed first, three shown, then +N more (%s)" % albums)
+    more = page.locator("#gp-visitors td.gp-albums .gp-detail").first.get_attribute("title")
+    check(more == "GP Extra 2\nGP Extra 3", "visitors: +N more lists the rest on hover (%r)" % more)
+    check(r and r[2] == "81.2.69.160\nLondon, GB", "visitors: IP column = last IP seen, with location (%s)" % (r[2] if r else None))
+
+    # Guest filter by browser id prefix; it sticks on Visitors only.
+    admin_page(page, ADMIN + "-visitors&f=1&days=1&guest=" + sid[:8])
+    names = [x[0] for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    check(names == [sid[:8]], "guest filter: id prefix shows only that visitor (%s)" % names)
+    admin_page(page, ADMIN + "-photos")
+    check(page.input_value("input[name=guest]") == "", "sticky: another tab keeps its own filter")
+    admin_page(page, ADMIN + "-visitors")
+    names = [x[0] for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    check(page.input_value("input[name=guest]") == sid[:8] and names == [sid[:8]] and page.input_value("select[name=days]") == "1",
+          "sticky: a bare tab link brings the tab's filter back (%s)" % names)
+    page.click("a.gp-reset")
+    page.wait_for_load_state()
+    names = [x[0] for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    check(page.input_value("input[name=guest]") == "" and len(names) > 1 and page.input_value("select[name=days]") == "30",
+          "sticky: Reset filters goes back to the defaults (%d rows)" % len(names))
+
+    # Guest by username; an unknown name matches nobody.
+    admin_page(page, ADMIN + "-visitors&f=1&days=1&guest=admin")
+    names = [x[0] for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    check(set(names) == {"admin"}, "guest filter: username (%s)" % names)
+    _, clean = admin_page(page, ADMIN + "-visitors&f=1&days=1&guest=nobody%27s")
+    check(clean and page.locator("#gp-visitors").count() == 0 and page.input_value("input[name=guest]") == "nobody's",
+          "guest filter: unknown guest = no rows, quote kept intact")
+
+    # A username that also reads as a browser id names the user only.
+    sql("INSERT INTO piwigo_users (id, username) VALUES (900, 'deadbeef')")
+    try:
+        sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, user_id, image_id, category_id, event) VALUES "
+            "(NOW() - INTERVAL 2 MINUTE, '%s', 900, %s, %s, 'lightbox_view'), "
+            "(NOW() - INTERVAL 2 MINUTE, '%s', NULL, %s, %s, 'lightbox_view')"
+            % ("7" * 32, top_img, top_id, "deadbeef" + "0" * 24, top_img, top_id))
+        admin_page(page, ADMIN + "-visitors&f=1&days=1&guest=deadbeef")
+        n = page.locator("#gp-visitors tbody tr").count()
+        check(n == 1, "guest filter: a hex-looking username matches the user, not browser ids too (%d rows)" % n)
+    finally:
+        sql("DELETE FROM piwigo_users WHERE id = 900")
+    admin_page(page, ADMIN + "-visitors&reset=1")
+
+    # Reset is offered for any change from the tab's default, a preset period or a Photos sort alone too.
+    admin_page(page, ADMIN + "-live&f=1&days=1")
+    check(page.locator("a.gp-reset").count() == 1, "reset: shown for a preset period alone")
+    admin_page(page, ADMIN + "-live&reset=1")
+    check(page.locator("a.gp-reset").count() == 0, "reset: hidden at the defaults")
+    admin_page(page, ADMIN + "-photos&f=1&sort=name&dir=asc")
+    check(page.locator("a.gp-reset").count() == 1, "reset: shown for a Photos sort alone")
+    admin_page(page, ADMIN + "-photos&reset=1")
+
+    # Avg dwell holds when the Event filter keeps only dwell (and so drops the views).
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, category_id, event, value, detail) VALUES "
+        "(NOW() - INTERVAL 1 MINUTE, '%s', %s, %s, 'lightbox_view', NULL, NULL), "
+        "(NOW() - INTERVAL 1 MINUTE, '%s', %s, %s, 'dwell', 10, NULL)" % (sid, sub_img, sub_id, sid, sub_img, sub_id))
+    admin_page(page, ADMIN + "-photos&f=1&days=1&ev[]=dwell&guest=" + sid[:8])
+    head = table_head(page, "#gp-photos")
+    total = next(i for i, h in enumerate(head) if h.startswith("Dwell"))
+    avg = next(i for i, h in enumerate(head) if h.startswith("Avg dwell"))
+    cells = page.eval_on_selector_all("#gp-photos tbody tr", "trs => trs.map(t => [...t.cells].map(c => c.innerText.trim()))")
+    check(len(cells) == 1 and cells[0][total] == "10" and cells[0][avg] == "10",
+          "avg dwell: kept when the Event filter is dwell only (%s)" % cells)
+    admin_page(page, ADMIN + "-photos&reset=1")
+
+    # Date range, in display time.
+    admin_page(page, ADMIN + "-visitors&f=1&days=custom&from=2026-01-14&to=2026-01-14&guest=" + sid[:8])
+    r = visitor_row(page, sid[:8])
+    check(r is not None and page.is_visible("input[name=from]") and page.input_value("select[name=days]") == "custom",
+          "date range: 23:30 New York is on the 14th")
+    admin_page(page, ADMIN + "-visitors&f=1&days=custom&from=2026-01-15&to=2026-01-15&guest=" + sid[:8])
+    check(visitor_row(page, sid[:8]) is None, "date range: ...and not on the 15th (its UTC date)")
+    _, clean = admin_page(page, ADMIN + "-visitors&f=1&days=custom&from=2026-02-30")
+    check(clean and page.input_value("select[name=days]") == "30", "date range: an impossible date falls back to the default period")
+    admin_page(page, ADMIN + "-visitors&reset=1")
+
+    # Event filter (multi) on Live, including what the poll brings in.
+    admin_page(page, ADMIN + "-live&f=1&ev[]=zoom&ev[]=save_intent")
+    events = set(page.eval_on_selector_all("#gp-live tbody tr", "trs => trs.map(t => t.cells[3].innerText.split(' ')[0])"))
+    check(events == {"zoom", "save_intent"}, "event filter: Live shows only the ticked events (%s)" % sorted(events))
+    check("zoom, save_intent" in page.inner_text("details.gp-multi summary"), "event filter: summary names the ticked events")
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, category_id, event) VALUES "
+        "(NOW(), '%s', %s, %s, 'fullscreen')" % (sid, top_img, top_id))
+    skip_id = sql("SELECT MAX(id) FROM piwigo_pulse_event")[0][0]
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, category_id, event, value) VALUES "
+        "(NOW(), '%s', %s, %s, 'zoom', 2)" % (sid, top_img, top_id))
+    zoom_id = sql("SELECT MAX(id) FROM piwigo_pulse_event")[0][0]
+    page.wait_for_selector("#gp-live tr[data-id='%s']" % zoom_id, timeout=9000)
+    check(page.locator("#gp-live tr[data-id='%s']" % skip_id).count() == 0, "event filter: the poll leaves out other events")
+    admin_page(page, ADMIN + "-live")
+    ticked = page.eval_on_selector_all("input[name='ev[]']:checked", "es => es.map(e => e.value)")
+    check(ticked == ["zoom", "save_intent"], "sticky: Live keeps its event filter (%s)" % ticked)
+    admin_page(page, ADMIN + "-live&reset=1")
+
+    # Album filter on Live and Albums (parent includes sub-albums).
+    admin_page(page, ADMIN + "-albums&f=1&days=1&cat=%s" % top_id)
+    names = page.eval_on_selector_all("#gp-albums tbody tr", "trs => trs.map(t => t.cells[0].innerText)")
+    check(set(names) == {"Test Match", "Test Match / Second Half"}, "album filter: Albums tab, sub-albums included (%s)" % names)
+    admin_page(page, ADMIN + "-albums&f=1&days=1&guest=" + sid[:8])
+    href = page.locator("#gp-albums a[href*='-photos']").first.get_attribute("href")
+    check("guest=" + sid[:8] in href and "days=1" in href, "albums: Photos link carries the rest of the filter (%s)" % href)
+    admin_page(page, ADMIN + "-albums&reset=1")
+    admin_page(page, ADMIN + "-live&f=1&cat=%s" % sub_id)
+    albums = set(page.eval_on_selector_all("#gp-live tbody tr", "trs => trs.map(t => t.cells[2].innerText)"))
+    check(albums == {"Test Match / Second Half"}, "album filter: Live (%s)" % albums)
+    admin_page(page, ADMIN + "-live&reset=1")
+
+    # Client-side sort: numbers start biggest-first, a second click reverses, the sort is remembered.
+    admin_page(page, ADMIN + "-visitors&f=1&days=1")
+    col = table_head(page, "#gp-visitors").index("Photos")
+    page.locator("#gp-visitors thead th").nth(col).click()
+    vals = [int(x[col]) for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    check(len(vals) > 1 and vals == sorted(vals, reverse=True), "sort: first click on a number column sorts biggest first (%s)" % vals)
+    page.locator("#gp-visitors thead th").nth(col).click()
+    vals = [int(x[col]) for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    check(vals == sorted(vals), "sort: second click reverses (%s)" % vals)
+    admin_page(page, ADMIN + "-visitors")
+    vals = [int(x[col]) for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    cls = page.locator("#gp-visitors thead th").nth(col).get_attribute("class") or ""
+    check(vals == sorted(vals) and "gp-sorted-asc" in cls, "sort: remembered after reload (%s)" % vals)
+    page.evaluate("localStorage.clear()")
+    admin_page(page, ADMIN + "-visitors&reset=1")
+
+    # Live stays sorted as polled rows arrive.
+    admin_page(page, ADMIN + "-live&f=1&days=1")
+    page.locator("#gp-live thead th").nth(3).click()
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, category_id, event) VALUES "
+        "(NOW(), '%s', %s, %s, 'download')" % (sid, top_img, top_id))
+    new_id = sql("SELECT MAX(id) FROM piwigo_pulse_event")[0][0]
+    page.wait_for_selector("#gp-live tr[data-id='%s']" % new_id, timeout=9000)
+    events = page.eval_on_selector_all("#gp-live tbody tr", "trs => trs.map(t => t.cells[3].innerText.split(' ')[0])")
+    # Sorted by Event: each event name forms one block, the new download included.
+    blocks = [e for i, e in enumerate(events) if i == 0 or events[i - 1] != e]
+    check(len(blocks) == len(set(events)) > 1 and "download" in events,
+          "sort: Live re-sorts when the poll adds rows (%s)" % blocks)
+    page.evaluate("localStorage.clear()")
+    admin_page(page, ADMIN + "-live&reset=1")
+
+    # Photos sorts on the server: by name, either way, and the sort sticks.
+    admin_page(page, ADMIN + "-photos&f=1&days=1&sort=name&dir=asc")
+    names = page.eval_on_selector_all("#gp-photos tbody td.gp-photo", "tds => tds.map(t => t.innerText.trim())")
+    th = page.locator("#gp-photos thead th").first
+    check(len(names) > 1 and names == sorted(names) and "gp-sorted-asc" in (th.get_attribute("class") or "")
+          and "dir=desc" in th.locator("a").get_attribute("href"), "photos sort: by name A-Z, heading links to Z-A (%s)" % names)
+    admin_page(page, ADMIN + "-photos&f=1&days=1&sort=dwell_avg&dir=asc")
+    _, clean = admin_page(page, ADMIN + "-photos")
+    check(clean and page.input_value("input[name=sort]") == "dwell_avg" and page.input_value("input[name=dir]") == "asc",
+          "photos sort: sticks with the filter")
+    admin_page(page, ADMIN + "-photos&reset=1")
+
+    # The Live poll validates its filter too.
+    data = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&since_id=%d&filter=' + "
+                         "encodeURIComponent('{\"ev\":[\"zoom\",\"x\\'1\"],\"guest\":\"%s\",\"days\":\"9999\"}')).then(r => r.json())"
+                         % (since, sid[:8]))
+    evs = {e["event"] for e in data["result"]["events"]} if data.get("stat") == "ok" else None
+    check(evs == {"zoom"}, "live poll: filter applied, unknown event names dropped (%s)" % evs)
+    page.close()
+
+    sql("DELETE FROM piwigo_pulse_event WHERE id > %d" % since)
+    sql("DELETE FROM piwigo_categories WHERE id IN (%s)" % ",".join(map(str, extra)))
+
+
 def admin(p, token):
     """Admin tabs: album filter, full paths, photo detail, hover, Live paging, retention setting."""
     since = max_id()
@@ -825,6 +1059,9 @@ def admin(p, token):
     ctx = browser.new_context(viewport={"width": 1400, "height": 900})
     ctx.request.post(BASE + "ws.php?format=json", form={"method": "pwg.session.login", "username": "admin", "password": "adminpass"})
     page = ctx.new_page()
+    # Filters stick per tab across runs; start clean.
+    for tab in ("live", "photos", "visitors", "albums"):
+        admin_page(page, ADMIN + "-" + tab + "&reset=1")
 
     for tab in ("live", "photos", "visitors", "albums", "links", "settings"):
         html, clean = admin_page(page, ADMIN + "-" + tab)
@@ -897,6 +1134,7 @@ def admin(p, token):
 
     albums_tab(page, sid, token, top_id, sub_id, top_img)
     time_zone(page)
+    filters(ctx, token, top_id, sub_id, top_img, sub_img)
 
     # Retention: default 730, validated, and the prune honours it.
     admin_page(page, ADMIN + "-settings")
@@ -933,6 +1171,7 @@ def main():
         b = iphone(p, link)
         check(a and b and a != b, "two devices = two guests under one link")
         autoplay(p, link)
+        dwell_pause(p, link)
         page_context(p, link, token)
         admin(p, token)
         viewed_album(p, link, token)

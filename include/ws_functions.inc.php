@@ -47,10 +47,13 @@ function gallery_pulse_ws_live($params, &$service)
 {
   include_once(GALLERY_PULSE_PATH . 'include/stats.inc.php');
 
+  // The page's filter (JSON), validated again here.
+  $filter = is_string($params['filter']) ? json_decode(stripslashes($params['filter']), true) : null;
+  $state = gallery_pulse_filter_state($filter, 'live');
   $before_id = (int)$params['before_id'];
   return array(
     'events' => $before_id > 0
-      ? gallery_pulse_recent_events(0, GALLERY_PULSE_LIVE_PAGE, $before_id)
-      : gallery_pulse_recent_events((int)$params['since_id'], GALLERY_PULSE_LIVE_POLL, 0, true),
+      ? gallery_pulse_recent_events($state, 0, GALLERY_PULSE_LIVE_PAGE, $before_id)
+      : gallery_pulse_recent_events($state, (int)$params['since_id'], GALLERY_PULSE_LIVE_POLL, 0, true),
   );
 }

@@ -32,13 +32,20 @@ CREATE TABLE IF NOT EXISTS `' . $this->table . '` (
   KEY `k_img` (`image_id`, `event`),
   KEY `k_sid` (`sid`, `occurred_at`),
   KEY `k_time` (`occurred_at`),
-  KEY `k_token` (`share_token`, `occurred_at`)
+  KEY `k_token` (`share_token`, `occurred_at`),
+  KEY `k_cat` (`category_id`, `occurred_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;');
 
     // 1.5 added the visitor's IP; rows from before it keep NULL.
     if (pwg_db_num_rows(pwg_query('SHOW COLUMNS FROM `' . $this->table . '` LIKE \'ip\';')) == 0)
     {
       pwg_query('ALTER TABLE `' . $this->table . '` ADD `ip` VARCHAR(45) NULL AFTER `device`;');
+    }
+    // 1.6 lists the Album filter's choices on every page load: the index makes
+    // that a scan of distinct albums rather than of every event.
+    if (pwg_db_num_rows(pwg_query('SHOW INDEX FROM `' . $this->table . '` WHERE Key_name = \'k_cat\';')) == 0)
+    {
+      pwg_query('ALTER TABLE `' . $this->table . '` ADD KEY `k_cat` (`category_id`, `occurred_at`);');
     }
   }
 
