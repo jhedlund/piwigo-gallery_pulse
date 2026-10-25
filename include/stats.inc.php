@@ -12,6 +12,10 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 define('GALLERY_PULSE_LIVE_PAGE', 500);
 define('GALLERY_PULSE_LIVE_POLL', 100);
 define('GALLERY_PULSE_LIVE_MAX_ROWS', 2000);
+// Albums listed in a Visitors row before "+N more".
+define('GALLERY_PULSE_VISITOR_ALBUMS', 3);
+// Rows on the Photos and Visitors tabs.
+define('GALLERY_PULSE_TABLE_ROWS', 200);
 
 /**
  * Views = lightbox slides a person opened. Autoplay slides and photo-page
@@ -34,20 +38,268 @@ function gallery_pulse_sql_guests()
 }
 
 /**
- * @param int[]|null $cat_ids restrict to events filed under these albums
+ * Event names the Event filter offers: everything the beacon sends, plus
+ * server-side downloads.
  */
-function gallery_pulse_where($days, $token, $cat_ids = null)
+function gallery_pulse_event_names()
 {
-  $where = array('e.occurred_at >= DATE_SUB(NOW(), INTERVAL ' . (int)$days . ' DAY)');
-  if ($token !== null)
+  return array_merge(array_keys(gallery_pulse_client_events()), array('download'));
+}
+
+/**
+ * Period choices: days => label. The last one is everything kept.
+ */
+function gallery_pulse_periods()
+{
+  $retention = gallery_pulse_retention_days();
+  $periods = array(1 => 'Last 24 hours', 7 => 'Last 7 days', 30 => 'Last 30 days');
+  if ($retention > 365)
   {
-    $where[] = 'e.share_token = \'' . pwg_db_real_escape_string($token) . '\'';
+    $periods[365] = 'Last 365 days';
   }
-  if ($cat_ids !== null)
+  $periods[$retention] = 'All (' . $retention . ' days)';
+  return $periods;
+}
+
+/**
+ * A filter as the admin pages keep it: the form's own values, validated.
+ * Live and a photo's detail open on everything kept, the other tabs on 30 days.
+ *
+ *   days   int (a key of gallery_pulse_periods()) or 'custom' for from/to
+ *   from   Y-m-d in the display zone, or ''; to likewise, inclusive
+ *   cat    album id (its sub-albums included), or null
+ *   ev     event names; empty = all
+ *   guest  browser id prefix, username or "no beacon"; '' = everyone
+ *
+ * @param array $in raw request or stored values
+ * @param array|null $albums id => path to validate cat against; null = any positive id
+ */
+function gallery_pulse_filter_state($in, $tab, $albums = null)
+{
+  $in = is_array($in) ? $in : array();
+  $periods = gallery_pulse_periods();
+  $state = array(
+    'days' => $tab == 'live' || $tab == 'photo' ? gallery_pulse_retention_days() : 30,
+    'from' => '',
+    'to' => '',
+    'cat' => null,
+    'ev' => array(),
+    'guest' => '',
+  );
+
+  foreach (array('from', 'to') as $k)
   {
+    if (isset($in[$k]) && is_string($in[$k]) && gallery_pulse_parse_date($in[$k]) !== null)
+    {
+      $state[$k] = $in[$k];
+    }
+  }
+  if (isset($in['days']) && $in['days'] === 'custom' && ($state['from'] !== '' || $state['to'] !== ''))
+  {
+    $state['days'] = 'custom';
+    if ($state['from'] !== '' && $state['to'] !== '' && $state['from'] > $state['to'])
+    {
+      list($state['from'], $state['to']) = array($state['to'], $state['from']);
+    }
+  }
+  else
+  {
+    if (isset($in['days']) && is_scalar($in['days']) && isset($periods[(int)$in['days']]))
+    {
+      $state['days'] = (int)$in['days'];
+    }
+    $state['from'] = $state['to'] = '';
+  }
+
+  if (isset($in['cat']) && is_scalar($in['cat']) && (int)$in['cat'] > 0
+    && ($albums === null || isset($albums[(int)$in['cat']])))
+  {
+    $state['cat'] = (int)$in['cat'];
+  }
+  if (isset($in['ev']) && is_array($in['ev']))
+  {
+    $state['ev'] = array_values(array_intersect(gallery_pulse_event_names(), $in['ev']));
+  }
+  if (isset($in['guest']) && is_string($in['guest']))
+  {
+    $state['guest'] = substr(trim($in['guest']), 0, 64);
+  }
+  return $state;
+}
+
+/**
+ * Y-m-d at midnight in the display zone, or null if not a real date.
+ */
+function gallery_pulse_parse_date($s)
+{
+  if (!is_string($s) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $s))
+  {
+    return null;
+  }
+  $d = DateTime::createFromFormat('!Y-m-d', $s, gallery_pulse_timezone());
+  return $d !== false && $d->format('Y-m-d') === $s ? $d : null;
+}
+
+/**
+ * The URL query for a filter state, so a link reproduces it.
+ */
+function gallery_pulse_filter_query($state)
+{
+  $q = array('days' => $state['days']);
+  if ($state['days'] === 'custom')
+  {
+    $q['from'] = $state['from'];
+    $q['to'] = $state['to'];
+  }
+  if ($state['cat'] !== null)
+  {
+    $q['cat'] = $state['cat'];
+  }
+  if (!empty($state['ev']))
+  {
+    $q['ev'] = $state['ev'];
+  }
+  if ($state['guest'] !== '')
+  {
+    $q['guest'] = $state['guest'];
+  }
+  return http_build_query($q, '', '&');
+}
+
+/**
+ * SQL conditions on the event table (alias e) for a filter state.
+ */
+function gallery_pulse_where($state)
+{
+  $where = array(gallery_pulse_period_where($state, 'e.occurred_at'));
+  if ($state['cat'] !== null)
+  {
+    $cat_ids = array_merge(array($state['cat']), get_subcat_ids(array($state['cat'])));
     $where[] = 'e.category_id IN (' . implode(',', array_map('intval', $cat_ids)) . ')';
   }
+  if (!empty($state['ev']))
+  {
+    $where[] = 'e.event IN (\'' . implode('\',\'', array_intersect(gallery_pulse_event_names(), $state['ev'])) . '\')';
+  }
+  if ($state['guest'] !== '')
+  {
+    $where[] = gallery_pulse_guest_where($state['guest']);
+  }
   return implode("\n    AND ", $where);
+}
+
+/**
+ * The filter's period on a UTC datetime column. A custom range runs from the
+ * start of its first day to the end of its last, in the display zone.
+ */
+function gallery_pulse_period_where($state, $column)
+{
+  if ($state['days'] !== 'custom')
+  {
+    return $column . ' >= DATE_SUB(NOW(), INTERVAL ' . (int)$state['days'] . ' DAY)';
+  }
+  $where = array();
+  if ($state['from'] !== '')
+  {
+    $where[] = $column . ' >= \'' . gallery_pulse_utc(gallery_pulse_parse_date($state['from'])) . '\'';
+  }
+  if ($state['to'] !== '')
+  {
+    $where[] = $column . ' < \'' . gallery_pulse_utc(gallery_pulse_parse_date($state['to'])->modify('+1 day')) . '\'';
+  }
+  return implode(' AND ', $where);
+}
+
+function gallery_pulse_utc(DateTime $d)
+{
+  $u = clone $d;
+  return $u->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+}
+
+/**
+ * Guest filter: a browser id prefix (as shown, 4+ hex digits), a username, or
+ * "no beacon". Matches nothing when it is none of these.
+ */
+function gallery_pulse_guest_where($guest)
+{
+  global $conf;
+
+  $or = array();
+  if (strtolower($guest) === 'no beacon')
+  {
+    $or[] = 'e.sid = \'' . GALLERY_PULSE_NO_SID . '\'';
+  }
+  if (preg_match('/^[a-f0-9]{4,32}$/i', $guest))
+  {
+    $or[] = 'e.sid LIKE \'' . strtolower($guest) . '%\'';
+  }
+  $user_ids = query2array('
+SELECT ' . $conf['user_fields']['id'] . ' AS id
+  FROM ' . USERS_TABLE . '
+  WHERE ' . $conf['user_fields']['username'] . ' = \'' . pwg_db_real_escape_string($guest) . '\'
+;', null, 'id');
+  if (!empty($user_ids))
+  {
+    $or[] = 'e.user_id IN (' . implode(',', array_map('intval', $user_ids)) . ')';
+  }
+  return empty($or) ? '0' : '(' . implode(' OR ', $or) . ')';
+}
+
+/**
+ * The most recent visitors, as the Guest filter names them, for its suggestions.
+ */
+function gallery_pulse_guest_suggestions()
+{
+  $rows = query2array('
+SELECT sid, MAX(user_id) AS user_id, MAX(occurred_at) AS last_seen
+  FROM ' . GALLERY_PULSE_TABLE . '
+  GROUP BY sid
+  ORDER BY last_seen DESC
+  LIMIT 100
+;');
+  $users = gallery_pulse_usernames(array_map(function ($r) { return $r['user_id']; }, $rows));
+  $names = array();
+  foreach ($rows as $r)
+  {
+    if ($r['sid'] === GALLERY_PULSE_NO_SID)
+    {
+      $names[] = 'no beacon';
+    }
+    else
+    {
+      $names[] = $r['user_id'] !== null && isset($users[$r['user_id']]) ? $users[$r['user_id']] : substr($r['sid'], 0, 8);
+    }
+  }
+  return array_values(array_unique($names));
+}
+
+/**
+ * The filter for each tab, as last used: kept in the admin's user preferences,
+ * so it survives logout and follows them to another browser.
+ */
+function gallery_pulse_saved_filter($tab)
+{
+  $all = function_exists('userprefs_get_param') ? userprefs_get_param('gallery_pulse_filters', array()) : array();
+  return is_array($all) && isset($all[$tab]) && is_array($all[$tab]) ? $all[$tab] : array();
+}
+
+function gallery_pulse_save_filter($tab, $state)
+{
+  if (!function_exists('userprefs_update_param'))
+  {
+    return;
+  }
+  $all = userprefs_get_param('gallery_pulse_filters', array());
+  $all = is_array($all) ? $all : array();
+  if ($state === null)
+  {
+    unset($all[$tab]);
+  }
+  else
+  {
+    $all[$tab] = $state;
+  }
+  userprefs_update_param('gallery_pulse_filters', $all);
 }
 
 /**
@@ -390,28 +642,29 @@ function gallery_pulse_decorate_events(&$rows)
 }
 
 /**
- * Default: the newest $limit events. With $poll: the next $limit events after
+ * Events matching the Live filter. Default: the newest $limit events. With $poll: the next $limit events after
  * since_id (0 on an empty table), oldest first, so a poll that hits the limit
  * is continued by the next one instead of skipping rows. With before_id: the
  * $limit events just older than it, for paging back.
  */
-function gallery_pulse_recent_events($since_id, $limit, $before_id = 0, $poll = false)
+function gallery_pulse_recent_events($state, $since_id, $limit, $before_id = 0, $poll = false)
 {
   if ($before_id > 0)
   {
-    $where = 'id < ' . (int)$before_id;
+    $where = 'e.id < ' . (int)$before_id;
     $order = 'DESC';
   }
   else
   {
-    $where = 'id > ' . (int)$since_id;
+    $where = 'e.id > ' . (int)$since_id;
     $order = $poll ? 'ASC' : 'DESC';
   }
   $query = '
-SELECT id, occurred_at, sid, share_token, image_id, category_id, event, value, detail, device, ip
-  FROM ' . GALLERY_PULSE_TABLE . '
+SELECT e.id, e.occurred_at, e.sid, e.share_token, e.image_id, e.category_id, e.event, e.value, e.detail, e.device, e.ip
+  FROM ' . GALLERY_PULSE_TABLE . ' e
   WHERE ' . $where . '
-  ORDER BY id ' . $order . '
+    AND ' . gallery_pulse_where($state) . '
+  ORDER BY e.id ' . $order . '
   LIMIT ' . (int)$limit . '
 ;';
   $rows = query2array($query);
@@ -444,6 +697,7 @@ SELECT id, occurred_at, sid, share_token, image_id, category_id, event, value, d
 function gallery_pulse_photo_sorts()
 {
   return array(
+    'name' => 'name',
     'views' => 'views',
     'page_views' => 'page_views',
     'guests' => 'guests',
@@ -452,34 +706,45 @@ function gallery_pulse_photo_sorts()
     'max_zoom' => 'max_zoom',
     'saves' => 'saves',
     'downloads' => 'downloads',
+    'dwell_avg' => 'dwell_avg',
   );
 }
 
 /**
- * @param int[]|null $cat_ids albums to include, already expanded to sub-albums
+ * The top rows by $sort: sorting happens here, not in the page, so a sort
+ * reaches photos beyond the first page of another order.
+ *
  * @param int|null $image_id a single photo, for the detail view
  */
-function gallery_pulse_photo_stats($days, $cat_ids, $sort, $image_id = null)
+function gallery_pulse_photo_stats($state, $sort, $dir = 'desc', $image_id = null)
 {
   $sorts = gallery_pulse_photo_sorts();
   $order = isset($sorts[$sort]) ? $sorts[$sort] : 'views';
+  $dir = $dir == 'asc' ? 'ASC' : 'DESC';
+  $dwell = 'COALESCE(SUM(CASE WHEN e.event = \'dwell\' THEN e.value END), 0)';
 
+  // Wrapped so the sort can put blanks last in either direction.
   $query = '
+SELECT * FROM (
 SELECT e.image_id,
+    MAX(COALESCE(NULLIF(i.name, \'\'), i.file)) AS name,
     ' . gallery_pulse_sql_views() . ' AS views,
     SUM(e.event = \'page_view\' AND e.detail = \'photo\') AS page_views,
     ' . gallery_pulse_sql_guests() . ' AS guests,
-    COALESCE(SUM(CASE WHEN e.event = \'dwell\' THEN e.value END), 0) AS dwell_total,
+    ' . $dwell . ' AS dwell_total,
     SUM(e.event = \'zoom\') AS zooms,
     MAX(CASE WHEN e.event = \'zoom\' THEN e.value END) AS max_zoom,
     SUM(e.event = \'save_intent\') AS saves,
-    SUM(e.event = \'download\') AS downloads
+    SUM(e.event = \'download\') AS downloads,
+    ' . $dwell . ' / NULLIF(' . gallery_pulse_sql_views() . ', 0) AS dwell_avg
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, null, $cat_ids) . '
+    LEFT JOIN ' . IMAGES_TABLE . ' i ON i.id = e.image_id
+  WHERE ' . gallery_pulse_where($state) . '
     AND ' . ($image_id === null ? 'e.image_id IS NOT NULL' : 'e.image_id = ' . (int)$image_id) . '
   GROUP BY e.image_id
-  ORDER BY ' . $order . ' DESC, views DESC, e.image_id
-  LIMIT 200
+) t
+  ORDER BY t.' . $order . ' IS NULL, t.' . $order . ' ' . $dir . ', t.views DESC, t.image_id
+  LIMIT ' . GALLERY_PULSE_TABLE_ROWS . '
 ;';
   $rows = query2array($query);
   gallery_pulse_decorate_images($rows);
@@ -520,9 +785,10 @@ SELECT ' . $conf['user_fields']['id'] . ' AS id, ' . $conf['user_fields']['usern
 }
 
 /**
- * @param int[]|null $cat_ids only events filed under these albums
+ * The most recently active browsers matching the filter, each with the IP it
+ * was last seen from and the albums it viewed, latest first.
  */
-function gallery_pulse_visitors($days, $cat_ids)
+function gallery_pulse_visitors($state)
 {
   $query = '
 SELECT e.sid,
@@ -534,12 +800,13 @@ SELECT e.sid,
     SUM(e.event = \'zoom\') AS zooms,
     SUM(e.event = \'save_intent\') AS saves,
     SUM(e.event = \'download\') AS downloads,
-    COALESCE(SUM(CASE WHEN e.event = \'dwell\' THEN e.value END), 0) AS dwell_total
+    COALESCE(SUM(CASE WHEN e.event = \'dwell\' THEN e.value END), 0) AS dwell_total,
+    SUBSTRING_INDEX(GROUP_CONCAT(e.ip ORDER BY e.occurred_at DESC, e.id DESC), \',\', 1) AS last_ip
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, null, $cat_ids) . '
+  WHERE ' . gallery_pulse_where($state) . '
   GROUP BY e.sid
   ORDER BY last_seen DESC
-  LIMIT 200
+  LIMIT ' . GALLERY_PULSE_TABLE_ROWS . '
 ;';
   $rows = query2array($query);
   if (empty($rows))
@@ -547,17 +814,17 @@ SELECT e.sid,
     return $rows;
   }
 
-  // Albums each visitor reached, most active first.
+  // Albums each visitor reached, most recently viewed first.
   $sids = array_map(function ($r) { return '\'' . pwg_db_real_escape_string($r['sid']) . '\''; }, $rows);
   $visited = array();
   foreach (query2array('
-SELECT e.sid, e.category_id, COUNT(*) AS n
+SELECT e.sid, e.category_id, MAX(e.occurred_at) AS last_seen
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, null, $cat_ids) . '
+  WHERE ' . gallery_pulse_where($state) . '
     AND e.sid IN (' . implode(',', $sids) . ')
     AND e.category_id IS NOT NULL
   GROUP BY e.sid, e.category_id
-  ORDER BY n DESC, e.category_id
+  ORDER BY last_seen DESC, e.category_id
 ;') as $v)
   {
     $visited[$v['sid']][] = (int)$v['category_id'];
@@ -569,9 +836,11 @@ SELECT e.sid, e.category_id, COUNT(*) AS n
   }
   $paths = gallery_pulse_category_paths($all);
   $users = gallery_pulse_usernames(array_map(function ($r) { return $r['user_id']; }, $rows));
+  $locations = gallery_pulse_ip_locations(array_map(function ($r) { return $r['last_ip']; }, $rows));
 
   foreach ($rows as &$r)
   {
+    $r['ip_location'] = $r['last_ip'] !== null && isset($locations[$r['last_ip']]) ? $locations[$r['last_ip']] : null;
     $r['guest'] = $r['sid'] === GALLERY_PULSE_NO_SID ? 'no beacon' : substr($r['sid'], 0, 8);
     $r['username'] = $r['user_id'] !== null && isset($users[$r['user_id']]) ? $users[$r['user_id']] : null;
     $names = array();
@@ -582,9 +851,10 @@ SELECT e.sid, e.category_id, COUNT(*) AS n
         $names[] = $paths[$c];
       }
     }
-    $r['album_first'] = empty($names) ? null : $names[0];
-    $r['albums_more'] = max(0, count($names) - 1);
-    $r['albums_all'] = implode("\n", $names);
+    // The latest few inline; the rest behind "+N more".
+    $r['albums_shown'] = array_slice($names, 0, GALLERY_PULSE_VISITOR_ALBUMS);
+    $r['albums_more'] = max(0, count($names) - GALLERY_PULSE_VISITOR_ALBUMS);
+    $r['albums_rest'] = implode("\n", array_slice($names, GALLERY_PULSE_VISITOR_ALBUMS));
     $r['dwell_total'] = round((float)$r['dwell_total']);
     $r['first_seen_display'] = gallery_pulse_format_time($r['first_seen']);
     $r['last_seen_display'] = gallery_pulse_format_time($r['last_seen']);
@@ -610,7 +880,7 @@ SELECT MAX(user_id) FROM ' . GALLERY_PULSE_TABLE . ' WHERE sid = \'' . pwg_db_re
  * at, for events since 1.2), with the routes that reached it: each share link,
  * or "direct" for public pages and logged-in users.
  */
-function gallery_pulse_album_stats($days)
+function gallery_pulse_album_stats($state)
 {
   $query = '
 SELECT e.category_id,
@@ -623,7 +893,7 @@ SELECT e.category_id,
     SUM(e.event = \'download\') AS downloads,
     MAX(e.occurred_at) AS last_seen
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, null) . '
+  WHERE ' . gallery_pulse_where($state) . '
   GROUP BY e.category_id
   ORDER BY last_seen DESC
 ;';
@@ -633,7 +903,7 @@ SELECT e.category_id,
   foreach (query2array('
 SELECT e.category_id, e.share_token, COUNT(*) AS n
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, null) . '
+  WHERE ' . gallery_pulse_where($state) . '
   GROUP BY e.category_id, e.share_token
   ORDER BY n DESC
 ;') as $route)
@@ -660,9 +930,11 @@ SELECT e.category_id, e.share_token, COUNT(*) AS n
 
 /**
  * Everything for one photo's detail view, or null if the photo doesn't exist.
+ * Only the filter's period applies: the detail is the whole story of one photo.
  */
-function gallery_pulse_photo_detail($image_id, $days)
+function gallery_pulse_photo_detail($image_id, $state)
 {
+  $state = array_merge($state, array('cat' => null, 'ev' => array(), 'guest' => ''));
   $image_id = (int)$image_id;
   $rows = query2array('
 SELECT id, name, file, path, representative_ext, width, height, rotation, hit
@@ -675,7 +947,7 @@ SELECT id, name, file, path, representative_ext, width, height, rotation, hit
   }
   $img = $rows[0];
 
-  $totals = gallery_pulse_photo_stats($days, null, 'views', $image_id);
+  $totals = gallery_pulse_photo_stats($state, 'views', 'desc', $image_id);
 
   $guests = query2array('
 SELECT e.sid,
@@ -688,7 +960,7 @@ SELECT e.sid,
     SUM(e.event = \'save_intent\') AS saves,
     SUM(e.event = \'download\') AS downloads
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, null) . '
+  WHERE ' . gallery_pulse_where($state) . '
     AND e.image_id = ' . $image_id . '
   GROUP BY e.sid
   ORDER BY last_seen DESC
@@ -708,7 +980,7 @@ SELECT e.sid,
   $timeline = query2array('
 SELECT e.id, e.occurred_at, e.sid, e.share_token, e.image_id, e.category_id, e.event, e.value, e.detail, e.device, e.ip
   FROM ' . GALLERY_PULSE_TABLE . ' e
-  WHERE ' . gallery_pulse_where($days, null) . '
+  WHERE ' . gallery_pulse_where($state) . '
     AND e.image_id = ' . $image_id . '
   ORDER BY e.occurred_at DESC, e.id DESC
   LIMIT 500
@@ -721,7 +993,7 @@ SELECT e.id, e.occurred_at, e.sid, e.share_token, e.image_id, e.category_id, e.e
 SELECT COALESCE(SUM(image_type = \'picture\'), 0), COALESCE(SUM(image_type = \'high\'), 0)
   FROM ' . HISTORY_TABLE . '
   WHERE image_id = ' . $image_id . '
-    AND TIMESTAMP(date, time) >= DATE_SUB(NOW(), INTERVAL ' . (int)$days . ' DAY)
+    AND ' . gallery_pulse_period_where($state, 'TIMESTAMP(date, time)') . '
 ;'));
 
   return array(

@@ -22,3 +22,17 @@
 .gp-settings, .gp-settings p { text-align: left; margin-left: 0; padding-left: 0; }
 .gp-ip { word-break: normal; overflow-wrap: normal; }
 .gp-warning { color: #c0392b; opacity: 1; font-weight: bold; }
+.gp-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; }
+.gp-filters label { margin-right: 0; }
+.gp-range label + label { margin-left: 12px; }
+.gp-multi { position: relative; }
+.gp-multi summary { cursor: pointer; }
+.gp-multi > div { position: absolute; z-index: 100; top: 100%; left: 0; margin-top: 4px; padding: 8px 12px; min-width: 180px; background: #fff; color: #333; border-radius: 4px; box-shadow: 0 4px 16px rgba(0, 0, 0, .3); }
+.gp-multi > div label { display: block; margin: 2px 0; white-space: nowrap; }
+.gp-multi > div p { margin: 6px 0 0; }
+.gp-reset { margin-left: 4px; }
+.gp-sortable th { cursor: pointer; user-select: none; }
+.gp-sortable th:hover { text-decoration: underline; }
+.gp-sorted-asc::after { content: " \2191"; }
+.gp-sorted-desc::after { content: " \2193"; }
+.gp-albums div + div { margin-top: 2px; }

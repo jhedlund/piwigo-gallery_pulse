@@ -10,10 +10,25 @@ Admin: **Plugins → Gallery Pulse**, five tabs:
 | Tab | Shows |
 |---|---|
 | Live | Newest 500 events, then **Show older** pages back 500 at a time. Polls every 1 s while events arrive, 5 s after three empty polls, not at all while the tab is hidden. Keeps at most 2,000 rows on screen. The Album column shows the album each event was viewed in (full path, linked to Photos filtered to it); the share link is on the visitor timeline. The Event cell carries the value (`dwell 1.2s`, `zoom 2.4×`); the IP column shows the visitor's address with its city and country beneath |
-| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads. Sortable; filterable by period and by album (an album includes its sub-albums). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
-| Visitors | One row per browser, by username when a registered user was logged in, with the albums they visited; filterable by album. Click a row for the visitor's timeline, which also shows the share link of each event |
+| Photos | Per photo: views, guests, dwell, zooms, max zoom, save intent, downloads, avg dwell. Every column sorts either way on the server (the top 200 of that sort are shown). Click a photo for its detail page: totals, guests, events, and Piwigo's own History counts for it, shown separately. Hovering a thumbnail anywhere shows a larger preview |
+| Visitors | One row per browser, by username when a registered user was logged in, with the albums they viewed (latest first; three shown, the rest on hover over *+N more*) and the IP they were last seen from, with its location. The 200 most recently active are shown. Click a row for the visitor's timeline, which also shows the share link of each event |
 | Albums | Totals per album (full path), with the routes guests came by: each share link, or *direct* for public pages and logged-in users |
 | Settings | Retention, display time zone, GeoIP database path, and the event table's size |
+
+**Filters** (since 1.6) on Live, Photos, Visitors and Albums: period or a date range
+(whole days in the display time zone), album (with its sub-albums), events (any
+number; none ticked = all) and guest (a browser id as shown, 4+ characters, a
+username, or `no beacon`). Each tab keeps its own filter, and the Photos sort with it,
+in the admin's Piwigo user preferences, so a bare tab link brings it back; **Reset
+filters** clears it. A link carrying filter values (e.g. an Albums row's Photos link,
+which passes on the rest of the Albums filter) replaces the target tab's filter. Live
+applies its filter to every poll and Show older page. A photo's detail page takes only
+the period.
+
+**Sorting** (since 1.6): every other table sorts in the page by clicking a heading,
+again to reverse; numbers and times start largest or latest first, blanks stay at the
+bottom, and each table's sort is remembered in the browser. Live keeps its sort as
+polled rows arrive.
 
 ## What is recorded
 
