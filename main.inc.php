@@ -82,6 +82,7 @@ function gallery_pulse_ws_add_methods($arr)
     array(
       'since_id' => array('default' => 0, 'type' => WS_TYPE_INT | WS_TYPE_POSITIVE),
       'before_id' => array('default' => 0, 'type' => WS_TYPE_INT | WS_TYPE_POSITIVE),
+      'window' => array('default' => 0, 'type' => WS_TYPE_INT | WS_TYPE_POSITIVE),
       'filter' => array('default' => ''),
     ),
     'Gallery Pulse: latest events for the admin Live view.',

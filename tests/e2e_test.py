@@ -12,6 +12,7 @@ import math
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 from playwright.sync_api import sync_playwright
@@ -694,6 +695,15 @@ def realtime(ctx, sid, token, img, other_img, cat):
     page.wait_for_timeout(500)
     ids = [b["id"] for b in page.evaluate(BUBBLES)]
     check(len(ids) == 60 and 10 ** 6 not in ids, "realtime: a flood is capped at 60 bubbles, the weakest dropped (%d)" % len(ids))
+    # 1.8: 60 equally busy photos can't all be full size; they shrink to fit and spread out.
+    page.wait_for_timeout(3000)
+    crowd = page.evaluate(BUBBLES)
+    bw, bh = page.evaluate("[document.getElementById('gp-board').clientWidth, document.getElementById('gp-board').clientHeight]")
+    fill = sum(math.pi * (b["r"] + 3) ** 2 for b in crowd) / (bw * bh)
+    piled = sum(1 for i, p_ in enumerate(crowd) for q in crowd[i + 1:]
+                if math.hypot(p_["x"] - q["x"], p_["y"] - q["y"]) < p_["r"] + q["r"] - 6)
+    check(fill <= 0.55 and piled <= 3, "realtime: a burst on 60 photos shrinks them to fit the board (fill %.2f, %d piled pairs, r %.0f)"
+          % (fill, piled, crowd[0]["r"] if crowd else 0))
     page.unroute(seed_ws)
     page.unroute(poll_ws)
 
@@ -788,12 +798,16 @@ def realtime(ctx, sid, token, img, other_img, cat):
     # More than a page of events in the newest minutes: the seed pages back to the window's edge.
     first_page = [dict(flood[0], id=5 * 10 ** 9 + 1000 - i, image_id=9 * 10 ** 6, sid="p" * 32,
                        occurred_at="2026-01-01 00:%02d:%02d" % (29 - i // 120, 59 - i % 60)) for i in range(500)]
+    # Sorted by time, as the server sends it, with one late beacon (a high id stamped
+    # earlier than the rest) last: its id must not be the cursor.
+    first_page[1]["occurred_at"] = "2026-01-01 00:01:00"
+    first_page.append(first_page.pop(1))
     older = [at(20, "q" * 32, "20:00"), at(21, "r" * 32, "08:30", event="download", image_id=9 * 10 ** 6),
              at(22, "s" * 32, "00:00")]
     older = [dict(e, id=5 * 10 ** 9 + 400 - i) for i, e in enumerate(older)]
     asked, polled = [], []
     def paged(route):
-        asked.append(route.request.url.split("before_id=")[-1])
+        asked.append(route.request.url.split("before_id=")[-1])  # "<id>&window=30"
         events = first_page if len(asked) == 1 else older if len(asked) == 2 else []
         route.fulfill(content_type="application/json", body=json.dumps(
             {"stat": "ok", "result": {"events": events, "now": "2026-01-01 00:30:00"}}))
@@ -807,9 +821,10 @@ def realtime(ctx, sid, token, img, other_img, cat):
     page.wait_for_timeout(1500)
     counts = page.evaluate("gpRealtime.timeline()")
     big = next((x for x in page.evaluate(BUBBLES) if x["id"] == 9 * 10 ** 6), {})
-    check(asked == [str(2 ** 53 - 1), str(first_page[-1]["id"])] and counts[19] == 1 and counts[8] == 1
-          and big.get("downloads") == 1 and polled and all(x == str(first_page[0]["id"]) for x in polled),
-          "realtime: a seed past one page backfills to the window's edge, then polls from the newest (pages %s, %s)"
+    check(asked == [str(2 ** 53 - 1) + "&window=30", str(5 * 10 ** 9 + 501) + "&window=30"] and counts[19] == 1 and counts[8] == 1
+          and big.get("downloads") == 1 and polled and all(x == str(5 * 10 ** 9 + 1000) for x in polled),
+          "realtime: a seed past one page backfills from the lowest id to the window's edge, despite a late beacon, "
+          "then polls from the newest (pages %s, %s)"
           % (asked, {i: n for i, n in enumerate(counts) if n}))
     page.evaluate("gpRealtime.stop()")
     page.unroute(seed_ws)
@@ -939,11 +954,23 @@ def realtime(ctx, sid, token, img, other_img, cat):
                                            - time.mktime(time.strptime(db_now, "%Y-%m-%d %H:%M:%S"))) <= 2,
           "realtime: poll returns the database's now (%s vs %s)" % (data.get("result", {}).get("now"), db_now))
 
+    # The seed's window, on the server: a 40-minute-old event isn't sent, a fresh one is.
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) VALUES "
+        "(NOW() - INTERVAL 40 MINUTE, '%s', '%s', %s, %s, 'zoom'), (NOW() - INTERVAL 1 MINUTE, '%s', '%s', %s, %s, 'zoom')"
+        % ("a" * 32, token, img, cat, "a" * 32, token, img, cat))
+    old_id, new_id = int(max_id()) - 1, int(max_id())
+    got = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&before_id=%d&window=30').then(r => r.json())"
+                        % (new_id + 1))
+    got_ids = [e["id"] for e in got["result"]["events"]] if got.get("stat") == "ok" else []
+    check(int(new_id) in map(int, got_ids) and int(old_id) not in map(int, got_ids) and len(got_ids) <= 500,
+          "realtime: the seed's window=30 leaves out events older than 30 minutes (%d rows)" % len(got_ids))
+    sql("DELETE FROM piwigo_pulse_event WHERE id IN (%d, %d)" % (old_id, new_id))
+
     admin_page(page, ADMIN + "-realtime")
-    page.wait_for_timeout(1500)
+    page.wait_for_function("!document.getElementById('gp-rt-status').textContent", timeout=60000)
     sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
         "VALUES (NOW(), '%s', '%s', %s, %s, 'lightbox_view')" % ("a" * 32, token, other_img, cat))
-    page.wait_for_function("id => gpRealtime.bubbles().some(b => String(b.id) === id)", arg=str(other_img), timeout=5000)
+    page.wait_for_function("id => gpRealtime.bubbles().some(b => String(b.id) === id)", arg=str(other_img), timeout=8000)
     page.wait_for_timeout(2500)
     r1 = bubble_r(page, other_img)
     check(r1 is not None and r1 > 20, "realtime: a view brings its photo onto the board (r=%s)" % r1)
@@ -972,10 +999,29 @@ def realtime(ctx, sid, token, img, other_img, cat):
 
     # Past the window, everything fades out.
     admin_page(page, ADMIN + "-realtime")
-    page.wait_for_function("gpRealtime.bubbles().length > 0", timeout=5000)
+    page.wait_for_function("gpRealtime.bubbles().length > 0", timeout=60000)  # a full window seeds in pages
     page.evaluate("gpRealtime.stop(); gpRealtime.tick(31 * 60000)")
     check(page.evaluate(BUBBLES) == [] and page.locator(".gp-bubble").count() == 0 and page.is_visible(".gp-rt-empty"),
           "realtime: 31 minutes later the board is empty again")
+    # Album filter: sticky, sent to the server, and only that album's photos arrive.
+    img_cat = sql("SELECT category_id FROM piwigo_image_category WHERE image_id = %s AND category_id <> %s LIMIT 1" % (img, cat))[0][0]
+    seeds_seen = []
+    page.on("request", lambda r: "before_id" in r.url and seeds_seen.append(r.url))
+    admin_page(page, ADMIN + "-realtime&cat=%s" % cat)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_function("!document.getElementById('gp-rt-status').textContent", timeout=60000)
+    picked = page.input_value("#gp-rt-album")
+    sent = urllib.parse.unquote(seeds_seen[-1]) if seeds_seen else ""
+    check(picked == str(cat) and '"cat":%s' % cat in sent, "realtime: the album filter sticks and goes to the server (%s, %s)"
+          % (picked, sent[-40:]))
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) VALUES "
+        "(NOW(), '%s', '%s', %s, %s, 'lightbox_view'), (NOW(), '%s', '%s', %s, %s, 'lightbox_view')"
+        % ("a" * 32, token, img, img_cat, "a" * 32, token, other_img, cat))
+    page.wait_for_function("id => gpRealtime.bubbles().some(b => String(b.id) === id)", arg=str(other_img), timeout=8000)
+    check(str(img) not in [str(b["id"]) for b in page.evaluate(BUBBLES)],
+          "realtime: a view in another album stays off the filtered board")
+    admin_page(page, ADMIN + "-realtime&cat=")  # clear the sticky album
+    check(page.input_value("#gp-rt-album") == "", "realtime: All albums clears the filter")
     page.close()
 
 

@@ -655,12 +655,16 @@ function gallery_pulse_decorate_events(&$rows)
  * is continued by the next one instead of skipping rows. With before_id: the
  * $limit events just older than it, for paging back.
  */
-function gallery_pulse_recent_events($state, $since_id, $limit, $before_id = 0, $poll = false)
+function gallery_pulse_recent_events($state, $since_id, $limit, $before_id = 0, $poll = false, $window = 0)
 {
   if ($before_id > 0)
   {
     $where = 'e.id < ' . (int)$before_id;
     $order = 'DESC';
+    if ($window > 0)
+    {
+      $where .= ' AND e.occurred_at > DATE_SUB(NOW(), INTERVAL ' . (int)$window . ' MINUTE)';
+    }
   }
   else
   {

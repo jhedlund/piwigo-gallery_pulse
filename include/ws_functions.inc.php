@@ -51,12 +51,14 @@ function gallery_pulse_ws_live($params, &$service)
   $filter = is_string($params['filter']) ? json_decode(stripslashes($params['filter']), true) : null;
   $state = gallery_pulse_filter_state($filter, 'live');
   $before_id = (int)$params['before_id'];
+  // Real-time's seed: only events that occurred in its last N minutes.
+  $window = min((int)$params['window'], GALLERY_PULSE_RT_WINDOW);
   // The database's clock, which stamps occurred_at: Real-time ages events
   // against it rather than the browser's.
   list($now) = pwg_db_fetch_row(pwg_query('SELECT NOW();'));
   return array(
     'events' => $before_id > 0
-      ? gallery_pulse_recent_events($state, 0, GALLERY_PULSE_LIVE_PAGE, $before_id)
+      ? gallery_pulse_recent_events($state, 0, GALLERY_PULSE_LIVE_PAGE, $before_id, false, $window)
       : gallery_pulse_recent_events($state, (int)$params['since_id'], GALLERY_PULSE_LIVE_POLL, 0, true),
     'now' => $now,
   );

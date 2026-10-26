@@ -220,15 +220,23 @@
 
 {* ------------------------------------------------------------- Real-time *}
 {if $GP_TAB == 'realtime'}
-<div class="gp-board" id="gp-board"><p class="gp-rt-status" id="gp-rt-status">Loading…</p><div class="gp-rt-info" id="gp-rt-info"><img alt=""><b></b><table></table></div><p class="gp-rt-empty">Waiting for guests — photos appear here as they're viewed.</p></div>
+<div class="gp-board" id="gp-board"><select class="gp-rt-album" id="gp-rt-album" aria-label="Album">
+  <option value="">All albums</option>
+  {foreach from=$GP_RT_ALBUMS key=id item=path}
+  <option value="{$id}"{if $id == $GP_RT_CAT} selected{/if}>{$path|escape}</option>
+  {/foreach}
+</select><p class="gp-rt-status" id="gp-rt-status">Loading…</p><div class="gp-rt-info" id="gp-rt-info"><img alt=""><b></b><table></table></div><p class="gp-rt-empty">Waiting for guests — photos appear here as they're viewed.</p></div>
 <div class="gp-rt-graph"><div class="gp-rt-bars" id="gp-rt-bars"></div><div class="gp-rt-axis"><span>{$GP_RT_WINDOW} min ago</span><span>guests per minute</span><span>now</span></div></div>
-<p class="gp-note">Photos float up as guests view them, grow with views, zooms, saves and downloads, and fade after a quiet spell (a photo's activity halves every {$GP_RT_HALF_LIFE} minutes; nothing older than {$GP_RT_WINDOW} minutes counts). Over the last {$GP_RT_WINDOW} minutes, a blue ring thickens with a photo's downloads, a bar near its bottom lengthens with its zooms, a &hearts; counts save attempts (right-click, long-press or drag), and a number at the top left counts the guests who looked at it, from two up. Hover a photo for its numbers, click it for its details. Nothing here is kept — it starts fresh each time it's opened.</p>
+<p class="gp-note">Photos float up as guests view them, grow with views, zooms, saves and downloads, and fade after a quiet spell (a photo's activity halves every {$GP_RT_HALF_LIFE} minutes; nothing older than {$GP_RT_WINDOW} minutes counts). Over the last {$GP_RT_WINDOW} minutes, a blue ring thickens with a photo's downloads, a bar near its bottom lengthens with its zooms, a &hearts; counts save attempts (right-click, long-press or drag), and a number at the top left counts the guests who looked at it, from two up. Hover a photo for its numbers, click it for its details; the menu at the top left shows one album (with its sub-albums). Nothing here is kept — it starts fresh each time it's opened.</p>
 
 {footer_script}
 (function () {
   var board = document.getElementById('gp-board');
   var status = document.getElementById('gp-rt-status');
   var POLL = {$GP_LIVE_POLL}, MAX = {$GP_RT_MAX}, PAGE = {$GP_LIVE_PAGE}, SEED_PAGES = 40;
+  document.getElementById('gp-rt-album').addEventListener('change', function () {
+    location.href = '{$GP_BASE}&cat=' + this.value;
+  });
   // Downloads made without a beacon cookie share this sid: not a guest.
   var NO_SID = '{$GP_NO_SID}';
   var WINDOW = {$GP_RT_WINDOW} * 60000, HALF = {$GP_RT_HALF_LIFE} * 60000;
@@ -406,9 +414,17 @@
     var resize = !still || dirty || clock - packedAt >= 30000 || dtMs > 1000;
     if (resize) {
       list.forEach(function (b) { b.s = score(b); top = Math.max(top, b.s); });
+      var area = 0;
       list.forEach(function (b) {
-        var gone = b.s < FLOOR || clock - b.lastAt > WINDOW;
-        var target = gone ? 0 : MIN_R + (MAX_R - MIN_R) * Math.sqrt(b.s / top);
+        b.gone = b.s < FLOOR || clock - b.lastAt > WINDOW;
+        b.target = b.gone ? 0 : MIN_R + (MAX_R - MIN_R) * Math.sqrt(b.s / top);
+        area += Math.PI * (b.target + 3) * (b.target + 3);
+      });
+      // A burst that lifts every photo at once (a big download run) can't fit
+      // at full size: shrink them all to about half the board, as pack() does.
+      var k = still ? 1 : Math.min(1, Math.sqrt(0.5 * w * h / Math.max(area, 1)));
+      list.forEach(function (b) {
+        var gone = b.gone, target = b.target * k;
         b.r = still ? target : b.r + (target - b.r) * Math.min(1, dt * 4 + (dtMs > 1000 ? 1 : 0));
         if (gone && b.r < 2) { remove(b); b.dead = true; }
       });
@@ -571,19 +587,21 @@
   // whole table from its oldest row.
   var gen = 0, ready = false;
 
-  // Newest first, a page at a time (Show older from the top), back until a
-  // page reaches past the window — bounded, for a burst like a big zip.
+  // The window's events, newest ids first, a page at a time (Show older from
+  // the top, limited by the server to the window) until a short page — bounded,
+  // for a burst like a big zip. A page comes back sorted by time, not id, so
+  // the cursor is its lowest id.
   function seed(mine) {
-    var all = [];
+    var all = [], ids = new Set();
     function page(before) {
-      return fetchEvents('before_id=' + before, mine).then(function (events) {
+      return fetchEvents('before_id=' + before + '&window=' + WINDOW / 60000, mine).then(function (events) {
         if (events === null) { return null; }
-        all = all.concat(events);
-        var oldest = events[events.length - 1];
-        if (events.length >= PAGE && all.length < PAGE * SEED_PAGES && clock - utc(oldest.occurred_at) <= WINDOW) {
-          return page(oldest.id);
-        }
-        return all;
+        var low = before;
+        events.forEach(function (e) {
+          low = Math.min(low, e.id);
+          if (!ids.has(e.id)) { ids.add(e.id); all.push(e); }
+        });
+        return events.length >= PAGE && all.length < PAGE * SEED_PAGES ? page(low) : all;
       });
     }
     return page(Number.MAX_SAFE_INTEGER).then(function (events) {
