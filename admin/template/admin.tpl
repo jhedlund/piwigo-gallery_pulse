@@ -220,21 +220,23 @@
 
 {* ------------------------------------------------------------- Real-time *}
 {if $GP_TAB == 'realtime'}
-<p class="gp-note">Photos float up as guests view them, grow with views, zooms, saves and downloads, and fade after a quiet spell (a photo's activity halves every {$GP_RT_HALF_LIFE} minutes; nothing older than {$GP_RT_WINDOW} minutes counts). Click a photo for its details. Nothing here is kept — it starts fresh each time it's opened.</p>
-<p class="gp-rt-status" id="gp-rt-status">Loading…</p>
-<div class="gp-board" id="gp-board"><p class="gp-rt-empty">Waiting for guests — photos appear here as they're viewed.</p></div>
+<div class="gp-board" id="gp-board"><p class="gp-rt-status" id="gp-rt-status">Loading…</p><div class="gp-rt-info" id="gp-rt-info"><img alt=""><b></b><table></table></div><p class="gp-rt-empty">Waiting for guests — photos appear here as they're viewed.</p></div>
+<div class="gp-rt-graph"><div class="gp-rt-bars" id="gp-rt-bars"></div><div class="gp-rt-axis"><span>{$GP_RT_WINDOW} min ago</span><span>guests per minute</span><span>now</span></div></div>
+<p class="gp-note">Photos float up as guests view them, grow with views, zooms, saves and downloads, and fade after a quiet spell (a photo's activity halves every {$GP_RT_HALF_LIFE} minutes; nothing older than {$GP_RT_WINDOW} minutes counts). Over the last {$GP_RT_WINDOW} minutes, a blue ring thickens with a photo's downloads, a bar near its bottom lengthens with its zooms, a &hearts; counts save attempts (right-click, long-press or drag), and a number at the top left counts the guests who looked at it, from two up. Hover a photo for its numbers, click it for its details. Nothing here is kept — it starts fresh each time it's opened.</p>
+
 {footer_script}
 (function () {
   var board = document.getElementById('gp-board');
   var status = document.getElementById('gp-rt-status');
   var POLL = {$GP_LIVE_POLL}, MAX = {$GP_RT_MAX};
   var WINDOW = {$GP_RT_WINDOW} * 60000, HALF = {$GP_RT_HALF_LIFE} * 60000;
-  var MIN_R = 24, MAX_R = 90, FLOOR = 0.15, ACTIVE = 5 * 60000;
+  var MIN_R = 16, MAX_R = 90, FLOOR = 0.15, MARK_R = 22;
   var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  // image_id => bubble; sid => last event time. Times are the database's
-  // clock in ms: resynced from every response, advanced by tick() between.
-  var bubbles = new Map(), guests = new Map();
-  var clock = null, lastEvent = null, sinceId = 0;
+  // image_id => bubble; seen = every event's [sid, time] in the window, for
+  // the timeline. Times are the database's clock in ms: resynced from every
+  // response, advanced by tick() between.
+  var bubbles = new Map(), seen = [];
+  var clock = null, sinceId = 0;
 
   function utc(s) { return Date.parse(s.replace(' ', 'T') + 'Z'); }
 
@@ -257,27 +259,41 @@
     a.className = 'gp-bubble';
     a.setAttribute('data-id', e.image_id);
     a.href = e.detail_url;
-    a.title = e.image_name || '';
+    a.setAttribute('aria-label', e.image_name || '');
     var img = document.createElement('img');
     img.src = e.thumb;
     img.alt = '';
     a.appendChild(img);
-    a.appendChild(document.createElement('span')).className = 'gp-ring';
+    var bar = a.appendChild(document.createElement('span'));
+    bar.className = 'gp-zooms';
+    var dl = a.appendChild(document.createElement('span'));
+    dl.className = 'gp-downloads';
+    var people = a.appendChild(document.createElement('span'));
+    people.className = 'gp-chip gp-guests';
+    var saved = a.appendChild(document.createElement('span'));
+    saved.className = 'gp-chip gp-saves';
+    var ring = a.appendChild(document.createElement('span'));
+    ring.className = 'gp-ring';
     board.appendChild(a);
     var w = board.clientWidth, h = board.clientHeight;
-    return {
-      id: e.image_id, el: a, img: img, preview: e.preview, score: 0, scoreAt: clock, lastAt: 0,
+    var b = {
+      id: e.image_id, el: a, img: img, bar: bar, dl: dl, people: people, saved: saved, ring: ring,
+      preview: e.preview, thumb: e.thumb, name: e.image_name || '', score: 0, scoreAt: clock, lastAt: 0, events: [], marks: '',
       x: w / 2 + (Math.random() - 0.5) * w * 0.5, y: h / 2 + (Math.random() - 0.5) * h * 0.5,
       vx: 0, vy: 0, r: 0, heading: Math.random() * 2 * Math.PI
     };
+    a.addEventListener('mouseenter', function () { hover = b; showInfo(); });
+    a.addEventListener('focus', function () { hover = b; showInfo(); });
+    a.addEventListener('mouseleave', function () { if (hover === b) { hover = null; showInfo(); } });
+    a.addEventListener('blur', function () { if (hover === b) { hover = null; showInfo(); } });
+    return b;
   }
 
   function add(e, live) {
     var t = utc(e.occurred_at);
     if (clock - t > WINDOW) { return; }
-    guests.set(e.sid, Math.max(guests.get(e.sid) || 0, t));
-    lastEvent = Math.max(lastEvent || 0, t);
-    // Album-only events just feed the status line.
+    seen.push([e.sid, t]);
+    // Album-only events just feed the timeline.
     if (!e.image_id || !e.thumb) { return; }
     var b = bubbles.get(e.image_id);
     if (!b) {
@@ -287,12 +303,13 @@
     b.score = score(b) + weight(e) * Math.pow(0.5, Math.max(0, clock - t) / HALF);
     b.scoreAt = clock;
     b.lastAt = Math.max(b.lastAt, t);
+    b.events.push({ t: t, event: e.event, value: e.value, sid: e.sid });
     dirty = true;
     if (live && !still) {
       var kick = 60 + Math.random() * 60, dir = Math.random() * 2 * Math.PI;
       b.vx += Math.cos(dir) * kick;
       b.vy += Math.sin(dir) * kick;
-      var ring = b.el.lastChild;
+      var ring = b.ring;
       ring.classList.remove('gp-pulse');
       void ring.offsetWidth; // restart the animation
       ring.classList.add('gp-pulse');
@@ -300,6 +317,7 @@
   }
 
   function remove(b) {
+    if (hover === b) { hover = null; showInfo(); }
     bubbles.delete(b.id);
     board.removeChild(b.el);
     dirty = true;
@@ -312,19 +330,27 @@
       .slice(0, bubbles.size - MAX).forEach(remove);
   }
 
-  function ago(ms) {
-    var s = Math.max(0, Math.round(ms / 1000));
-    return s < 60 ? s + ' s' : s < 3600 ? Math.floor(s / 60) + ' m' : Math.floor(s / 3600) + ' h';
-  }
-
-  function showStatus() {
-    var n = 0;
-    guests.forEach(function (t, sid) {
-      if (clock - t > WINDOW) { guests.delete(sid); } else if (clock - t <= ACTIVE) { n++; }
+  // Distinct guests per minute over the window, oldest first.
+  var bars = document.getElementById('gp-rt-bars'), MINUTES = WINDOW / 60000;
+  for (var m = 0; m < MINUTES; m++) { bars.appendChild(document.createElement('span')); }
+  function timeline() {
+    var cut = clock - WINDOW;
+    seen = seen.filter(function (x) { return x[1] > cut; });
+    var mins = [];
+    for (var i = 0; i < MINUTES; i++) { mins.push(new Set()); }
+    seen.forEach(function (x) {
+      var i = MINUTES - 1 - Math.floor((clock - x[1]) / 60000);
+      if (i >= 0 && i < MINUTES) { mins[i].add(x[0]); }
     });
-    status.textContent = (n === 1 ? '1 guest' : n + ' guests') + ' active'
-      + (lastEvent === null ? ' · no activity in the last ' + WINDOW / 60000 + ' minutes'
-        : clock - lastEvent < 10000 ? ' · active now' : ' · quiet for ' + ago(clock - lastEvent));
+    return mins.map(function (m) { return m.size; });
+  }
+  function showTimeline() {
+    var counts = timeline(), top = Math.max(3, Math.max.apply(null, counts));
+    counts.forEach(function (n, i) {
+      var bar = bars.children[i], ago = MINUTES - 1 - i;
+      bar.style.height = (n ? Math.max(8, 100 * n / top) : 0) + '%';
+      bar.title = (n === 1 ? '1 guest' : n + ' guests') + (ago ? ', ' + ago + '–' + (ago + 1) + ' min ago' : ', this minute');
+    });
   }
 
   // Reduced motion: no animation at all. Sizes snap and the board is packed
@@ -392,7 +418,7 @@
       drift(list, dt, w, h);
     }
     draw(list, w, h);
-    if (clock - statusAt >= 1000 || dtMs > 1000) { statusAt = clock; showStatus(); }
+    if (clock - statusAt >= 1000 || dtMs > 1000) { statusAt = clock; showTimeline(); showInfo(); }
   }
 
   function drift(list, dt, w, h) {
@@ -431,8 +457,89 @@
       b.el.style.transform = 'translate(' + (b.x - b.r) + 'px,' + (b.y - b.r) + 'px)';
       // The thumbnail blurs past ~140 px: switch to the larger derivative.
       if (size > 140 && b.preview && !b.big) { b.big = true; b.img.src = b.preview; }
+      marks(b);
     });
     board.classList.toggle('gp-board-empty', list.length === 0);
+  }
+
+  // Downloads thicken a blue ring, zooms lengthen a bar near the bottom, save
+  // intents show a heart and two or more guests a head count, all over the
+  // window. Ring and bar saturate so a busy photo isn't loud.
+  // A photo's numbers over the window, for its marks and the info panel.
+  function tally(b) {
+    b.events = b.events.filter(function (x) { return clock - x.t <= WINDOW; });
+    var n = { views: 0, guests: new Set(), dwell: 0, zooms: 0, deepest: 0, saves: 0, downloads: 0 };
+    b.events.forEach(function (x) {
+      n.guests.add(x.sid);
+      switch (x.event) {
+        case 'lightbox_view': case 'page_view': n.views++; break;
+        case 'dwell': n.dwell += x.value || 0; break;
+        case 'zoom': n.zooms++; n.deepest = Math.max(n.deepest, x.value || 0); break;
+        case 'save_intent': n.saves++; break;
+        case 'download': n.downloads++; break;
+      }
+    });
+    n.guests = n.guests.size;
+    return n;
+  }
+  function ringPx(b, n) {
+    return n.downloads ? Math.max(2, Math.min(2 + n.downloads, 6, b.r * 0.12)) : 0;
+  }
+  function barPct(n) {
+    return n.zooms ? n.zooms / (n.zooms + 2) : 0;
+  }
+  function marks(b) {
+    var n = b.n = tally(b), small = b.r < MARK_R;
+    // Bar and chips need room: the smallest bubbles keep only the ring.
+    var saves = small ? 0 : n.saves, people = small ? 0 : n.guests;
+    // 1.39 r is the bubble's width at the bar's height (14% up from the bottom).
+    var px = Math.round(ringPx(b, n) * 2) / 2, len = small ? 0 : Math.round(barPct(n) * 1.39 * b.r);
+    var font = Math.max(10, Math.min(15, Math.round(b.r * 0.2)));
+    var key = [px, len, saves, people, font].join(' ');
+    if (key === b.marks) { return; }
+    b.marks = key;
+    b.ringPx = px;
+    b.barPx = len;
+    b.dl.style.boxShadow = px ? 'inset 0 0 0 ' + px + 'px rgba(61, 155, 240, .9)' : '';
+    b.bar.style.display = len ? 'block' : '';
+    b.bar.style.width = len + 'px';
+    b.bar.style.height = Math.max(3, Math.round(b.r * 0.07)) + 'px';
+    chip(b.saved, saves ? '\u2665' + (saves > 1 ? saves : '') : '', font);
+    chip(b.people, people > 1 ? String(people) : '', font);
+  }
+
+  // Hovering a photo shows its numbers in the board's top-right corner. The
+  // panel ignores the pointer, so bubbles underneath stay clickable.
+  var info = document.getElementById('gp-rt-info'), hover = null;
+  function ago(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    return s < 60 ? s + ' s' : s < 3600 ? Math.floor(s / 60) + ' m ' + s % 60 + ' s' : Math.floor(s / 3600) + ' h';
+  }
+  function showInfo() {
+    info.classList.toggle('gp-rt-info-on', !!hover);
+    if (!hover) { return; }
+    var b = hover, n = tally(b);
+    var src = b.preview || b.thumb;
+    if (info.firstChild.getAttribute('src') !== src) { info.firstChild.src = src; }
+    info.children[1].textContent = b.name;
+    var rows = [
+      ['Views', n.views], ['Guests', n.guests], ['Dwell', n.dwell ? ago(n.dwell * 1000) : '0 s'],
+      ['Zooms', n.zooms + (n.deepest ? ' (up to ' + Math.round(n.deepest * 10) / 10 + '\u00d7)' : '')],
+      ['Save attempts', n.saves], ['Downloads', n.downloads], ['Last activity', ago(clock - b.lastAt) + ' ago']
+    ];
+    var table = info.children[2];
+    table.textContent = '';
+    rows.forEach(function (r) {
+      var tr = table.insertRow();
+      tr.insertCell().textContent = r[0];
+      tr.insertCell().textContent = r[1];
+    });
+  }
+
+  function chip(el, text, font) {
+    el.textContent = text;
+    el.style.display = text ? 'block' : '';
+    el.style.fontSize = font + 'px';
   }
 
   var frame = null, prev = 0;
@@ -466,13 +573,13 @@
     return fetchEvents('before_id=' + Number.MAX_SAFE_INTEGER, mine).then(function (events) {
       if (events === null) { return; }
       bubbles.forEach(remove);
-      guests.clear();
-      lastEvent = null;
+      seen = [];
       events.forEach(function (e) { sinceId = Math.max(sinceId, e.id); });
       events.slice().reverse().forEach(function (e) { add(e, false); });
       cap();
       tick(0);
-      showStatus();
+      showTimeline();
+      status.textContent = '';
       ready = true;
       schedule(1000);
     });
@@ -535,9 +642,12 @@
     tick: tick,
     bubbles: function () {
       return Array.from(bubbles.values()).map(function (b) {
-        return { id: b.id, r: b.r, score: score(b), x: b.x, y: b.y, src: b.img.src };
+        return { id: b.id, r: b.r, score: score(b), x: b.x, y: b.y, src: b.img.src,
+          downloads: b.n ? b.n.downloads : 0, zooms: b.n ? b.n.zooms : 0, ring: b.ringPx || 0, bar: b.barPx || 0,
+          saves: b.saved.textContent, guests: b.people.textContent };
       });
     },
+    timeline: timeline,
     stop: function () { cancelAnimationFrame(frame); clearTimeout(timer); frame = null; }
   };
 })();
