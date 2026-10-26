@@ -246,7 +246,7 @@
   // the timeline. Times are the database's clock in ms: resynced from every
   // response, advanced by tick() between.
   var bubbles = new Map(), seen = [];
-  var clock = null, sinceId = 0;
+  var clock = null, sinceId = 0, highWater = 0;
 
   function utc(s) { return Date.parse(s.replace(' ', 'T') + 'Z'); }
 
@@ -577,6 +577,7 @@
         if (mine !== gen) { return null; }
         if (data.stat !== 'ok') { throw new Error(data.message); }
         clock = utc(data.result.now);
+        highWater = Math.max(highWater, +data.result.max_id || 0);
         return data.result.events;
       });
   }
@@ -608,6 +609,7 @@
       if (events === null) { return; }
       bubbles.forEach(remove);
       seen = [];
+      sinceId = Math.max(sinceId, highWater);
       events.forEach(function (e) { sinceId = Math.max(sinceId, e.id); });
       events.slice().reverse().forEach(function (e) { add(e, false); });
       cap();

@@ -830,6 +830,22 @@ def realtime(ctx, sid, token, img, other_img, cat):
     page.unroute(seed_ws)
     page.unroute(poll_ws)
 
+    # An empty window: polling starts from the server's highest id, not 0.
+    polled = []
+    page.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:30:00", "max_id": 777000}})))
+    def note_poll(route):
+        polled.append(route.request.url.split("since_id=")[-1])
+        empty(route)
+    page.route(poll_ws, note_poll)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1500)
+    check(polled and all(x == "777000" for x in polled),
+          "realtime: an empty seed polls from the server's highest id, never 0 (%s)" % polled)
+    page.evaluate("gpRealtime.stop()")
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
     # A failed seed retries with backoff and never polls from since_id=0.
     seeds, polls = [], []
     def flaky_seed(route):
@@ -964,6 +980,11 @@ def realtime(ctx, sid, token, img, other_img, cat):
     got_ids = [e["id"] for e in got["result"]["events"]] if got.get("stat") == "ok" else []
     check(int(new_id) in map(int, got_ids) and int(old_id) not in map(int, got_ids) and len(got_ids) <= 500,
           "realtime: the seed's window=30 leaves out events older than 30 minutes (%d rows)" % len(got_ids))
+    high = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&before_id=%d&window=30&filter=' + "
+                         "encodeURIComponent('{\"cat\":999999}')).then(r => r.json())" % (new_id + 1))
+    check(high.get("stat") == "ok" and high["result"]["events"] == [] and int(high["result"].get("max_id") or -1) == int(new_id),
+          "realtime: a seed reports the table's highest id even when nothing matches (%s vs %s)"
+          % (high.get("result", {}).get("max_id"), new_id))
     sql("DELETE FROM piwigo_pulse_event WHERE id IN (%d, %d)" % (old_id, new_id))
 
     admin_page(page, ADMIN + "-realtime")
