@@ -1,7 +1,7 @@
 <?php
 /*
 Plugin Name: Gallery Pulse
-Version: 1.7.0
+Version: 1.8.0
 Description: Engagement analytics for shared albums — lightbox views, dwell, zoom, save intent and downloads, per share link and per guest.
 Plugin URI: https://jhedlund.com
 Author: jhedlund
@@ -82,6 +82,7 @@ function gallery_pulse_ws_add_methods($arr)
     array(
       'since_id' => array('default' => 0, 'type' => WS_TYPE_INT | WS_TYPE_POSITIVE),
       'before_id' => array('default' => 0, 'type' => WS_TYPE_INT | WS_TYPE_POSITIVE),
+      'window' => array('default' => 0, 'type' => WS_TYPE_INT | WS_TYPE_POSITIVE),
       'filter' => array('default' => ''),
     ),
     'Gallery Pulse: latest events for the admin Live view.',

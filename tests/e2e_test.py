@@ -12,6 +12,7 @@ import math
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 from playwright.sync_api import sync_playwright
@@ -671,8 +672,15 @@ def realtime(ctx, sid, token, img, other_img, cat):
     _, clean = admin_page(page, ADMIN + "-realtime")
     page.wait_for_timeout(500)
     check(clean and page.is_visible(".gp-rt-empty") and page.evaluate(BUBBLES) == []
-          and page.locator("#gp-filters").count() == 0 and "0 guests active" in page.inner_text("#gp-rt-status"),
-          "realtime: renders empty, with no filter bar")
+          and page.locator("#gp-filters").count() == 0 and page.evaluate("gpRealtime.timeline()") == [0] * 30
+          and not page.is_visible("#gp-rt-status"),
+          "realtime: renders empty, with no filter bar and an empty timeline")
+    # 1.8: nothing between the tabs and the board, and the timeline fits under it without scrolling.
+    gap = page.evaluate("""() => document.getElementById('gp-board').getBoundingClientRect().top
+        - document.querySelector('.tabsheet').getBoundingClientRect().bottom""")
+    graph = page.locator(".gp-rt-graph").bounding_box()
+    check(gap < 40 and graph and graph["y"] + graph["height"] <= 900 and page.locator(".gp-rt-bars span").count() == 30,
+          "realtime: board right under the tabs, 30-minute timeline visible below it (gap %s, graph %s)" % (gap, graph))
     page.unroute(any_ws)
 
     # Too many photos at once: the board keeps the 60 busiest.
@@ -687,6 +695,157 @@ def realtime(ctx, sid, token, img, other_img, cat):
     page.wait_for_timeout(500)
     ids = [b["id"] for b in page.evaluate(BUBBLES)]
     check(len(ids) == 60 and 10 ** 6 not in ids, "realtime: a flood is capped at 60 bubbles, the weakest dropped (%d)" % len(ids))
+    # 1.8: 60 equally busy photos can't all be full size; they shrink to fit and spread out.
+    page.wait_for_timeout(3000)
+    crowd = page.evaluate(BUBBLES)
+    bw, bh = page.evaluate("[document.getElementById('gp-board').clientWidth, document.getElementById('gp-board').clientHeight]")
+    fill = sum(math.pi * (b["r"] + 3) ** 2 for b in crowd) / (bw * bh)
+    piled = sum(1 for i, p_ in enumerate(crowd) for q in crowd[i + 1:]
+                if math.hypot(p_["x"] - q["x"], p_["y"] - q["y"]) < p_["r"] + q["r"] - 6)
+    check(fill <= 0.55 and piled <= 3, "realtime: a burst on 60 photos shrinks them to fit the board (fill %.2f, %d piled pairs, r %.0f)"
+          % (fill, piled, crowd[0]["r"] if crowd else 0))
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # 1.8: downloads thicken a blue ring, zooms lengthen a bar near the bottom;
+    # both count over the window and saturate. Photo A: 25-minute-old downloads.
+    def ev(i, image, event, at):
+        return dict(flood[0], id=2 * 10 ** 9 + i, image_id=image, event=event, occurred_at="2026-01-01 00:" + at)
+    A, B, C = 7 * 10 ** 6, 7 * 10 ** 6 + 1, 7 * 10 ** 6 + 2
+    marked = [ev(1, A, "download", "05:00"), ev(2, A, "download", "05:00"), ev(3, A, "lightbox_view", "29:00"),
+              ev(4, B, "lightbox_view", "29:00")] + [ev(10 + i, B, "zoom", "29:00") for i in range(3)] \
+             + [ev(20 + i, C, "download", "29:30") for i in range(9)] + [ev(40 + i, C, "zoom", "29:30") for i in range(40)] \
+             + [ev(90, B, "save_intent", "29:10"), ev(91, C, "save_intent", "29:10"), ev(92, C, "save_intent", "29:20")] \
+             + [dict(ev(95 + i, B, "lightbox_view", "29:40"), sid="g%031d" % i) for i in range(2)] \
+             + [ev(97, B, "page_view", "29:41"), dict(ev(98, B, "lightbox_view", "29:42"), detail="autoplay"),
+                dict(ev(99, C, "download", "29:43"), sid="0" * 32)]
+    page.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": marked[::-1], "now": "2026-01-01 00:30:00"}})))
+    page.route(poll_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:30:00"}})))
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(800)
+    by = {b["id"]: b for b in page.evaluate(BUBBLES)}
+    a, b, c = by.get(A, {}), by.get(B, {}), by.get(C, {})
+    look = page.evaluate("""id => { const el = document.querySelector('.gp-bubble[data-id="' + id + '"]');
+        return [getComputedStyle(el.querySelector('.gp-downloads')).boxShadow,
+                getComputedStyle(el.querySelector('.gp-zooms')).display]; }""", A)
+    check(a.get("downloads") == 2 and 2 <= a.get("ring", 0) <= 4 and a.get("bar") == 0 and "61, 155, 240" in look[0] and look[1] == "none",
+          "realtime: 2 downloads draw a thin blue ring, no zoom bar (%s, %s)" % ({k: a.get(k) for k in ("ring", "bar")}, look))
+    check(b.get("zooms") == 3 and b.get("ring") == 0 and 0 < b.get("bar", 0) < 1.39 * b.get("r", 0),
+          "realtime: 3 zooms draw a bar inside the bubble, no ring (%s)" % {k: b.get(k) for k in ("ring", "bar", "r")})
+    check(c.get("downloads") == 10 and c.get("guests") == "",
+          "realtime: a no-beacon download counts, but not as a second guest (%s)" % ascii({k: c.get(k) for k in ("downloads", "guests")}))
+    check(c.get("ring", 99) <= 6 and c.get("ring", 0) >= a.get("ring", 99) and c.get("bar", 0) <= 1.39 * c.get("r", 0),
+          "realtime: 9 downloads and 40 zooms stay modest: ring <= 6 px, bar within the bubble (%s)"
+          % {k: c.get(k) for k in ("ring", "bar", "r")})
+    # Save intents count on a heart; distinct guests show from two up.
+    check(a.get("saves") == "" and a.get("guests") == "" and b.get("saves") == "\u2665" and b.get("guests") == "3"
+          and c.get("saves") == "\u26652" and c.get("guests") == "",
+          "realtime: hearts count save intents, a chip counts 2+ distinct guests (%s)"
+          % ascii([(x.get("saves"), x.get("guests")) for x in (a, b, c)]))
+    chips = page.evaluate("""id => [...document.querySelectorAll('.gp-bubble[data-id="' + id + '"] .gp-chip')]
+        .map(e => getComputedStyle(e).display)""", B)
+    check(chips == ["block", "block"], "realtime: both chips render on a photo with saves and guests (%s)" % chips)
+    # Hovering a photo shows its numbers top right, over the board, without blocking the bubbles.
+    sel = '.gp-bubble[data-id="%d"]' % B
+    page.dispatch_event(sel, "mouseenter")
+    page.wait_for_timeout(300)
+    box, board = page.locator("#gp-rt-info").bounding_box(), page.locator("#gp-board").bounding_box()
+    text = page.inner_text("#gp-rt-info") if box else ""
+    rows = dict(line.split("\t") for line in text.split("\n") if "\t" in line)
+    hit = page.evaluate("([x, y]) => document.elementFromPoint(x, y).closest('#gp-rt-info') === null",
+                        [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2]) if box else False
+    check(box and board["x"] + board["width"] - (box["x"] + box["width"]) < 20 and box["y"] - board["y"] < 20
+          and rows.get("Views") == "3" and rows.get("Guests") == "3" and rows.get("Zooms") == "3"
+          and rows.get("Save attempts") == "1" and rows.get("Downloads") == "0" and hit,
+          "realtime: hovering a photo shows its numbers top right, letting clicks through; Views leave out "
+          "autoplay and photo-page opens (%s)" % ascii(rows))
+    page.dispatch_event(sel, "mouseleave")
+    check(not page.is_visible("#gp-rt-info"), "realtime: the info panel goes when the pointer leaves")
+    page.evaluate("gpRealtime.stop(); gpRealtime.tick(6 * 60000)")  # no poll resyncs the clock back
+    a = next((x for x in page.evaluate(BUBBLES) if x["id"] == A), {})
+    look = page.evaluate("id => getComputedStyle(document.querySelector('.gp-bubble[data-id=\"' + id + '\"] .gp-downloads')).boxShadow", A)
+    check(a.get("downloads") == 0 and a.get("ring") == 0 and look == "none",
+          "realtime: downloads older than the window drop off the ring while the photo stays (%s, %s)" % (a, look))
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # 1.8 timeline: distinct guests per minute over the window, album-only events included.
+    def at(i, sid_, when, **kw):
+        e = dict(flood[0], id=4 * 10 ** 9 + i, image_id=8 * 10 ** 6 + i, sid=sid_, occurred_at="2026-01-01 00:" + when)
+        e.update(kw)
+        return e
+    g = ["t%031d" % i for i in range(5)]
+    timed = [at(1, g[1], "29:50"), at(2, g[1], "29:20"), at(3, g[2], "29:30"), at(4, g[3], "25:30"),
+             at(5, g[4], "10:30", image_id=None, thumb=None), at(6, g[0], "00:00"), at(7, "0" * 32, "15:30", event="download")]
+    page.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": timed[::-1], "now": "2026-01-01 00:30:00"}})))
+    page.route(poll_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:30:00"}})))
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1200)
+    counts = page.evaluate("gpRealtime.timeline()")
+    heights = page.eval_on_selector_all(".gp-rt-bars span", "s => s.map(e => e.getBoundingClientRect().height)")
+    check(counts[29] == 2 and counts[25] == 1 and counts[10] == 1 and sum(counts) == 4
+          and heights[29] > heights[25] > 0 and heights[0] == 0,
+          "realtime: the timeline counts distinct guests per minute, album views too, not no-beacon, nothing past 30 min (%s)"
+          % {i: n for i, n in enumerate(counts) if n})
+    page.evaluate("gpRealtime.stop()")  # no poll may slip into the next case's routes
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # More than a page of events in the newest minutes: the seed pages back to the window's edge.
+    first_page = [dict(flood[0], id=5 * 10 ** 9 + 1000 - i, image_id=9 * 10 ** 6, sid="p" * 32,
+                       occurred_at="2026-01-01 00:%02d:%02d" % (29 - i // 120, 59 - i % 60)) for i in range(500)]
+    # Sorted by time, as the server sends it, with one late beacon (a high id stamped
+    # earlier than the rest) last: its id must not be the cursor.
+    first_page[1]["occurred_at"] = "2026-01-01 00:01:00"
+    first_page.append(first_page.pop(1))
+    older = [at(20, "q" * 32, "20:00"), at(21, "r" * 32, "08:30", event="download", image_id=9 * 10 ** 6),
+             at(22, "s" * 32, "00:00")]
+    older = [dict(e, id=5 * 10 ** 9 + 400 - i) for i, e in enumerate(older)]
+    asked, polled = [], []
+    def paged(route):
+        asked.append(route.request.url.split("before_id=")[-1])  # "<id>&window=30"
+        events = first_page if len(asked) == 1 else older if len(asked) == 2 else []
+        # The table grows between pages: page 2's top (1001) is above the backfill,
+        # so polling must start from page 1's (1000) to receive event 1001.
+        top = 5 * 10 ** 9 + 999 + len(asked)
+        route.fulfill(content_type="application/json", body=json.dumps(
+            {"stat": "ok", "result": {"events": events, "now": "2026-01-01 00:30:00", "max_id": top}}))
+    def paged_poll(route):
+        polled.append(route.request.url.split("since_id=")[-1])
+        route.fulfill(content_type="application/json", body=json.dumps(
+            {"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:30:00"}}))
+    page.route(seed_ws, paged)
+    page.route(poll_ws, paged_poll)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1500)
+    counts = page.evaluate("gpRealtime.timeline()")
+    big = next((x for x in page.evaluate(BUBBLES) if x["id"] == 9 * 10 ** 6), {})
+    check(asked == [str(2 ** 53 - 1) + "&window=30", str(5 * 10 ** 9 + 501) + "&window=30"] and counts[19] == 1 and counts[8] == 1
+          and big.get("downloads") == 1 and polled and all(x == str(5 * 10 ** 9 + 1000) for x in polled),
+          "realtime: a seed past one page backfills from the lowest id to the window's edge, despite a late beacon, "
+          "then polls from the newest (pages %s, %s)"
+          % (asked, {i: n for i, n in enumerate(counts) if n}))
+    page.evaluate("gpRealtime.stop()")
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # An empty window: polling starts from the server's highest id, not 0.
+    polled = []
+    page.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:30:00", "max_id": 777000}})))
+    def note_poll(route):
+        polled.append(route.request.url.split("since_id=")[-1])
+        empty(route)
+    page.route(poll_ws, note_poll)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1500)
+    check(polled and all(x == "777000" for x in polled),
+          "realtime: an empty seed polls from the server's highest id, never 0 (%s)" % polled)
+    page.evaluate("gpRealtime.stop()")
     page.unroute(seed_ws)
     page.unroute(poll_ws)
 
@@ -770,7 +929,7 @@ def realtime(ctx, sid, token, img, other_img, cat):
             parked.append(route)  # stop resyncing the clock for the stale-answer check
         else:
             later(route)
-    # The board's one event is 2 minutes old, so the status reads "quiet for 2 m".
+    # The board's one event is 2 minutes old, so it sits in the timeline's third-newest minute.
     def later(route, events=()):
         route.fulfill(content_type="application/json",
                       body=json.dumps({"stat": "ok", "result": {"events": list(events), "now": "2026-01-01 00:02:00"}}))
@@ -791,20 +950,20 @@ def realtime(ctx, sid, token, img, other_img, cat):
           "realtime: a poll hanging across a hide/show doesn't stall the restarted board (%d before, %d after)"
           % (first, len(polls)))
     # When the old poll finally answers, its `now` (read when it was asked, 5 minutes
-    # earlier) must not rewind the new board: no score jump, no false "active now".
+    # earlier) must not rewind the new board: no score jump, no shifted timeline.
     parked.append(None)
     hung.wait_for_timeout(1500)
     score = lambda: hung.evaluate(BUBBLES)[0]["score"]
-    s0, st0 = score(), hung.inner_text("#gp-rt-status")
+    s0, st0 = score(), hung.evaluate("gpRealtime.timeline()")
     held[0].fulfill(content_type="application/json",
                     body=json.dumps({"stat": "ok", "result": {"events": [], "now": "2025-12-31 23:57:00"}}))
     hung.wait_for_timeout(1200)
-    s1, st1 = score(), hung.inner_text("#gp-rt-status")
+    s1, st1 = score(), hung.evaluate("gpRealtime.timeline()")
     for r in parked[1:]:
         later(r)
-    check(s1 <= s0 and "quiet for 2 m" in st0 and "quiet for 2 m" in st1,
-          "realtime: a stale poll's late answer doesn't rewind the clock (score %.3f -> %.3f, status %r -> %r)"
-          % (s0, s1, st0, st1))
+    check(s1 <= s0 and st0[27] == 1 and st1 == st0,
+          "realtime: a stale poll's late answer doesn't rewind the clock (score %.3f -> %.3f, timeline %s -> %s)"
+          % (s0, s1, st0.index(1) if 1 in st0 else None, st1.index(1) if 1 in st1 else None))
     hung.close()
 
     # The poll carries the database's clock.
@@ -814,11 +973,28 @@ def realtime(ctx, sid, token, img, other_img, cat):
                                            - time.mktime(time.strptime(db_now, "%Y-%m-%d %H:%M:%S"))) <= 2,
           "realtime: poll returns the database's now (%s vs %s)" % (data.get("result", {}).get("now"), db_now))
 
+    # The seed's window, on the server: a 40-minute-old event isn't sent, a fresh one is.
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) VALUES "
+        "(NOW() - INTERVAL 40 MINUTE, '%s', '%s', %s, %s, 'zoom'), (NOW() - INTERVAL 1 MINUTE, '%s', '%s', %s, %s, 'zoom')"
+        % ("a" * 32, token, img, cat, "a" * 32, token, img, cat))
+    old_id, new_id = int(max_id()) - 1, int(max_id())
+    got = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&before_id=%d&window=30').then(r => r.json())"
+                        % (new_id + 1))
+    got_ids = [e["id"] for e in got["result"]["events"]] if got.get("stat") == "ok" else []
+    check(int(new_id) in map(int, got_ids) and int(old_id) not in map(int, got_ids) and len(got_ids) <= 500,
+          "realtime: the seed's window=30 leaves out events older than 30 minutes (%d rows)" % len(got_ids))
+    high = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&before_id=%d&window=30&filter=' + "
+                         "encodeURIComponent('{\"cat\":999999}')).then(r => r.json())" % (new_id + 1))
+    check(high.get("stat") == "ok" and high["result"]["events"] == [] and int(high["result"].get("max_id") or -1) == int(new_id),
+          "realtime: a seed reports the table's highest id even when nothing matches (%s vs %s)"
+          % (high.get("result", {}).get("max_id"), new_id))
+    sql("DELETE FROM piwigo_pulse_event WHERE id IN (%d, %d)" % (old_id, new_id))
+
     admin_page(page, ADMIN + "-realtime")
-    page.wait_for_timeout(1500)
+    page.wait_for_function("!document.getElementById('gp-rt-status').textContent", timeout=60000)
     sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
         "VALUES (NOW(), '%s', '%s', %s, %s, 'lightbox_view')" % ("a" * 32, token, other_img, cat))
-    page.wait_for_function("id => gpRealtime.bubbles().some(b => String(b.id) === id)", arg=str(other_img), timeout=5000)
+    page.wait_for_function("id => gpRealtime.bubbles().some(b => String(b.id) === id)", arg=str(other_img), timeout=8000)
     page.wait_for_timeout(2500)
     r1 = bubble_r(page, other_img)
     check(r1 is not None and r1 > 20, "realtime: a view brings its photo onto the board (r=%s)" % r1)
@@ -847,10 +1023,29 @@ def realtime(ctx, sid, token, img, other_img, cat):
 
     # Past the window, everything fades out.
     admin_page(page, ADMIN + "-realtime")
-    page.wait_for_function("gpRealtime.bubbles().length > 0", timeout=5000)
+    page.wait_for_function("gpRealtime.bubbles().length > 0", timeout=60000)  # a full window seeds in pages
     page.evaluate("gpRealtime.stop(); gpRealtime.tick(31 * 60000)")
     check(page.evaluate(BUBBLES) == [] and page.locator(".gp-bubble").count() == 0 and page.is_visible(".gp-rt-empty"),
           "realtime: 31 minutes later the board is empty again")
+    # Album filter: sticky, sent to the server, and only that album's photos arrive.
+    img_cat = sql("SELECT category_id FROM piwigo_image_category WHERE image_id = %s AND category_id <> %s LIMIT 1" % (img, cat))[0][0]
+    seeds_seen = []
+    page.on("request", lambda r: "before_id" in r.url and seeds_seen.append(r.url))
+    admin_page(page, ADMIN + "-realtime&cat=%s" % cat)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_function("!document.getElementById('gp-rt-status').textContent", timeout=60000)
+    picked = page.input_value("#gp-rt-album")
+    sent = urllib.parse.unquote(seeds_seen[-1]) if seeds_seen else ""
+    check(picked == str(cat) and '"cat":%s' % cat in sent, "realtime: the album filter sticks and goes to the server (%s, %s)"
+          % (picked, sent[-40:]))
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) VALUES "
+        "(NOW(), '%s', '%s', %s, %s, 'lightbox_view'), (NOW(), '%s', '%s', %s, %s, 'lightbox_view')"
+        % ("a" * 32, token, img, img_cat, "a" * 32, token, other_img, cat))
+    page.wait_for_function("id => gpRealtime.bubbles().some(b => String(b.id) === id)", arg=str(other_img), timeout=8000)
+    check(str(img) not in [str(b["id"]) for b in page.evaluate(BUBBLES)],
+          "realtime: a view in another album stays off the filtered board")
+    admin_page(page, ADMIN + "-realtime&cat=")  # clear the sticky album
+    check(page.input_value("#gp-rt-album") == "", "realtime: All albums clears the filter")
     page.close()
 
 
@@ -954,7 +1149,7 @@ def upgrade():
     before = sql(snap)
     urllib.request.urlopen(BASE + "index.php").read()
     cols = [r[0] for r in sql("SHOW COLUMNS FROM piwigo_pulse_event")]
-    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.7.0"]], "upgrade: plugin updated to 1.7.0")
+    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.8.0"]], "upgrade: plugin updated to 1.8.0")
     check(cols[-2:] == ["device", "ip"], "upgrade: ip column added after device (%s)" % cols)
     check(sql("SHOW INDEX FROM piwigo_pulse_event WHERE Key_name = 'k_cat'") != [], "upgrade: album index added")
     check(sql(snap) == before and sql("SELECT COUNT(*) FROM piwigo_pulse_event WHERE ip IS NOT NULL") == [["0"]],
@@ -1096,6 +1291,15 @@ def filters(ctx, token, top_id, sub_id, top_img, sub_img):
           "visitors: albums most recently viewed first, three shown, then +N more (%s)" % albums)
     more = page.locator("#gp-visitors td.gp-albums .gp-detail").first.get_attribute("title")
     check(more == "GP Extra 2\nGP Extra 3", "visitors: +N more lists the rest on hover (%r)" % more)
+    # 1.8: a short centred rule above each visitor's albums but the first, and in no other column.
+    rules = page.eval_on_selector_all("#gp-visitors tbody tr", """trs => trs.map(tr => [...tr.cells].map(td => {
+        const b = getComputedStyle(td, '::before');
+        return b.content !== 'none' && b.borderTopStyle === 'solid' ? Math.round(parseFloat(b.width) / td.clientWidth * 100) : 0;
+    }))""")
+    albums_col = [row[1] for row in rules]
+    check(len(rules) >= 2 and albums_col[0] == 0 and all(30 <= w <= 50 for w in albums_col[1:])
+          and all(w == 0 for row in rules for i, w in enumerate(row) if i != 1),
+          "visitors: a short centred rule separates visitors in the Albums column only (%s)" % albums_col)
     check(r and r[2] == "81.2.69.160\nLondon, GB", "visitors: IP column = last IP seen, with location (%s)" % (r[2] if r else None))
 
     # Guest filter by browser id prefix; it sticks on Visitors only.

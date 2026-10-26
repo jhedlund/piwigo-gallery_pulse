@@ -128,12 +128,30 @@ $template->assign(array(
 switch ($tab)
 {
   case 'realtime':
+    // Just an album filter, sticky like the other tabs'; it includes sub-albums.
+    $rt_albums = gallery_pulse_album_options();
+    if (isset($_GET['cat']))
+    {
+      $rt_cat = (int)$_GET['cat'];
+      $rt_cat = isset($rt_albums[$rt_cat]) ? $rt_cat : null;
+      gallery_pulse_save_filter('realtime', $rt_cat ? array('cat' => $rt_cat) : null);
+    }
+    else
+    {
+      $saved = gallery_pulse_saved_filter('realtime');
+      $rt_cat = isset($saved['cat']) && isset($rt_albums[(int)$saved['cat']]) ? (int)$saved['cat'] : null;
+    }
     $template->assign(array(
-      'GP_WS' => get_root_url() . 'ws.php?format=json&method=galleryPulse.live',
+      'GP_RT_ALBUMS' => $rt_albums,
+      'GP_RT_CAT' => $rt_cat,
+      'GP_WS' => get_root_url() . 'ws.php?format=json&method=galleryPulse.live'
+        . ($rt_cat ? '&filter=' . rawurlencode(json_encode(array('cat' => $rt_cat))) : ''),
       'GP_LIVE_POLL' => GALLERY_PULSE_LIVE_POLL,
       'GP_RT_WINDOW' => GALLERY_PULSE_RT_WINDOW,
       'GP_RT_HALF_LIFE' => GALLERY_PULSE_RT_HALF_LIFE,
       'GP_RT_MAX' => GALLERY_PULSE_RT_MAX_BUBBLES,
+      'GP_LIVE_PAGE' => GALLERY_PULSE_LIVE_PAGE,
+      'GP_NO_SID' => GALLERY_PULSE_NO_SID,
     ));
     break;
 

@@ -51,12 +51,23 @@ function gallery_pulse_ws_live($params, &$service)
   $filter = is_string($params['filter']) ? json_decode(stripslashes($params['filter']), true) : null;
   $state = gallery_pulse_filter_state($filter, 'live');
   $before_id = (int)$params['before_id'];
+  // Real-time's seed: only events that occurred in its last N minutes.
+  $window = min((int)$params['window'], GALLERY_PULSE_RT_WINDOW);
   // The database's clock, which stamps occurred_at: Real-time ages events
   // against it rather than the browser's.
   list($now) = pwg_db_fetch_row(pwg_query('SELECT NOW();'));
-  return array(
+  // A seed also gets the table's highest id, read before its rows, whatever
+  // the window or filter matched: polling starts there even when the seed is
+  // empty, instead of walking the table from id 0.
+  $result = array();
+  if ($before_id > 0 && $window > 0)
+  {
+    list($max_id) = pwg_db_fetch_row(pwg_query('SELECT COALESCE(MAX(id), 0) FROM ' . GALLERY_PULSE_TABLE . ';'));
+    $result['max_id'] = (int)$max_id;
+  }
+  return $result + array(
     'events' => $before_id > 0
-      ? gallery_pulse_recent_events($state, 0, GALLERY_PULSE_LIVE_PAGE, $before_id)
+      ? gallery_pulse_recent_events($state, 0, GALLERY_PULSE_LIVE_PAGE, $before_id, false, $window)
       : gallery_pulse_recent_events($state, (int)$params['since_id'], GALLERY_PULSE_LIVE_POLL, 0, true),
     'now' => $now,
   );
