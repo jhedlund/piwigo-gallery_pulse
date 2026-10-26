@@ -761,15 +761,20 @@ def realtime(ctx, sid, token, img, other_img, cat):
 
     # A poll hanging across a hide/show must not stall the fresh generation's polling.
     hung = ctx.new_page()
-    held, polls = [], []
+    held, polls, parked = [], [], []
     def hold_first(route):
         polls.append(route.request.url)
         if not held:
             held.append(route)  # never answered until the end
+        elif parked:
+            parked.append(route)  # stop resyncing the clock for the stale-answer check
         else:
-            empty(route)
-    hung.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
-        {"stat": "ok", "result": {"events": flood[5:6], "now": "2026-01-01 00:00:01"}})))
+            later(route)
+    # The board's one event is 2 minutes old, so the status reads "quiet for 2 m".
+    def later(route, events=()):
+        route.fulfill(content_type="application/json",
+                      body=json.dumps({"stat": "ok", "result": {"events": list(events), "now": "2026-01-01 00:02:00"}}))
+    hung.route(seed_ws, lambda r: later(r, flood[5:6]))
     hung.route(poll_ws, hold_first)
     admin_page(hung, ADMIN + "-realtime")
     hung.wait_for_timeout(1800)
@@ -785,8 +790,21 @@ def realtime(ctx, sid, token, img, other_img, cat):
     check(first == 1 and held and len(polls) >= 3,
           "realtime: a poll hanging across a hide/show doesn't stall the restarted board (%d before, %d after)"
           % (first, len(polls)))
+    # When the old poll finally answers, its `now` (read when it was asked, 5 minutes
+    # earlier) must not rewind the new board: no score jump, no false "active now".
+    parked.append(None)
+    hung.wait_for_timeout(1500)
+    score = lambda: hung.evaluate(BUBBLES)[0]["score"]
+    s0, st0 = score(), hung.inner_text("#gp-rt-status")
     held[0].fulfill(content_type="application/json",
-                    body=json.dumps({"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:00:01"}}))
+                    body=json.dumps({"stat": "ok", "result": {"events": [], "now": "2025-12-31 23:57:00"}}))
+    hung.wait_for_timeout(1200)
+    s1, st1 = score(), hung.inner_text("#gp-rt-status")
+    for r in parked[1:]:
+        later(r)
+    check(s1 <= s0 and "quiet for 2 m" in st0 and "quiet for 2 m" in st1,
+          "realtime: a stale poll's late answer doesn't rewind the clock (score %.3f -> %.3f, status %r -> %r)"
+          % (s0, s1, st0, st1))
     hung.close()
 
     # The poll carries the database's clock.

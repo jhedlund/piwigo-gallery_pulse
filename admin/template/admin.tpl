@@ -442,10 +442,13 @@
     frame = requestAnimationFrame(loop);
   }
 
-  function fetchEvents(query) {
+  // Resolves null for an answer from an older generation, before it can touch
+  // anything — its `now` was read when it was asked, possibly minutes ago.
+  function fetchEvents(query, mine) {
     return fetch('{$GP_WS}&' + query, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        if (mine !== gen) { return null; }
         if (data.stat !== 'ok') { throw new Error(data.message); }
         clock = utc(data.result.now);
         return data.result.events;
@@ -460,8 +463,8 @@
 
   // The newest page, newest first: Show older from the top.
   function seed(mine) {
-    return fetchEvents('before_id=' + Number.MAX_SAFE_INTEGER).then(function (events) {
-      if (mine !== gen) { return; }
+    return fetchEvents('before_id=' + Number.MAX_SAFE_INTEGER, mine).then(function (events) {
+      if (events === null) { return; }
       bubbles.forEach(remove);
       guests.clear();
       lastEvent = null;
@@ -482,9 +485,9 @@
   function poll() {
     if (busy === gen || !ready) { return; }
     var mine = busy = gen;
-    fetchEvents('since_id=' + sinceId)
+    fetchEvents('since_id=' + sinceId, mine)
       .then(function (events) {
-        if (mine !== gen) { return 0; }
+        if (events === null) { return 0; }
         events.forEach(function (e) {
           sinceId = Math.max(sinceId, e.id);
           add(e, true);
