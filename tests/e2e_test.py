@@ -8,6 +8,7 @@ then asserts on the rows that landed in piwigo_pulse_event.
 """
 import ipaddress
 import json
+import math
 import subprocess
 import sys
 import time
@@ -644,6 +645,215 @@ IP_WANT = [("dwell 1.2s", "81.2.69.160", "London, GB", 0), ("zoom 2.4×", "2001:
            ("fullscreen", "172.18.0.1", None, 0), ("fullscreen", "", None, 0)]
 
 
+BUBBLES = "gpRealtime.bubbles()"
+
+
+def bubble_r(page, img):
+    return next((b["r"] for b in page.evaluate(BUBBLES) if str(b["id"]) == str(img)), None)
+
+
+def realtime(ctx, sid, token, img, other_img, cat):
+    """1.7 Real-time tab: first in the tab order, no filters, bubbles that appear, grow, link through and fade."""
+    page = ctx.new_page()
+    _, clean = admin_page(page, ADMIN)
+    tabs = page.eval_on_selector_all(".tabsheet li", "ls => ls.map(l => l.textContent.trim())")
+    check(clean and tabs[:2] == ["Real-time", "Live"] and page.locator("#gp-live").count() == 1,
+          "realtime: first tab, but the plugin still opens on Live (%s)" % tabs)
+
+    # Empty state, with the seed answered by an empty window.
+    def empty(route):
+        route.fulfill(content_type="application/json",
+                      body=json.dumps({"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:00:00"}}))
+    def ws(kind=""):
+        return lambda u: "galleryPulse.live" in u and kind in u
+    any_ws, seed_ws, poll_ws = ws(), ws("before_id"), ws("since_id")
+    page.route(any_ws, empty)
+    _, clean = admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(500)
+    check(clean and page.is_visible(".gp-rt-empty") and page.evaluate(BUBBLES) == []
+          and page.locator("#gp-filters").count() == 0 and "0 guests active" in page.inner_text("#gp-rt-status"),
+          "realtime: renders empty, with no filter bar")
+    page.unroute(any_ws)
+
+    # Too many photos at once: the board keeps the 60 busiest.
+    flood = [{"id": 10 ** 9 + i, "occurred_at": "2026-01-01 00:00:00", "sid": sid, "image_id": 10 ** 6 + i, "event": "download",
+              "detail": None, "value": None, "thumb": "i.php?/x-th.jpg", "preview": None, "detail_url": "#", "image_name": str(i)}
+             for i in range(80)]
+    flood[0]["event"] = "lightbox_view"
+    page.route(seed_ws, lambda r: r.fulfill(
+        content_type="application/json", body=json.dumps({"stat": "ok", "result": {"events": flood, "now": "2026-01-01 00:00:01"}})))
+    page.route(poll_ws, empty)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(500)
+    ids = [b["id"] for b in page.evaluate(BUBBLES)]
+    check(len(ids) == 60 and 10 ** 6 not in ids, "realtime: a flood is capped at 60 bubbles, the weakest dropped (%d)" % len(ids))
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # A failed seed retries with backoff and never polls from since_id=0.
+    seeds, polls = [], []
+    def flaky_seed(route):
+        seeds.append(route.request.url)
+        if len(seeds) <= 2:
+            route.abort()
+        else:
+            route.fulfill(content_type="application/json", body=json.dumps(
+                {"stat": "ok", "result": {"events": flood[5:6], "now": "2026-01-01 00:00:01"}}))
+    def count_poll(route):
+        polls.append(route.request.url)
+        empty(route)
+    page.route(seed_ws, flaky_seed)
+    page.route(poll_ws, count_poll)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1500)
+    retrying = "retrying" in page.inner_text("#gp-rt-status")
+    page.wait_for_timeout(4500)
+    check(retrying and len(seeds) == 3 and polls and all(u.endswith("since_id=%d" % flood[5]["id"]) for u in polls)
+          and len(page.evaluate(BUBBLES)) == 1,
+          "realtime: a failed seed retries, and polling starts only from the seeded cursor (%d seeds, polls %s)"
+          % (len(seeds), [u.split("since_id=")[-1] for u in polls]))
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # Reduced motion: a static packed layout — no gliding, no overlap, busiest in the middle.
+    still = ctx.new_page()
+    still.emulate_media(reduced_motion="reduce")
+    packed = [dict(flood[i], event="lightbox_view") for i in range(8) for _ in range(i + 1)]
+    for n, e in enumerate(packed):
+        e["id"] = 10 ** 9 + n
+    still.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": packed[::-1], "now": "2026-01-01 00:00:01"}})))
+    still.route(poll_ws, empty)
+    admin_page(still, ADMIN + "-realtime")
+    still.wait_for_function("gpRealtime.bubbles().length === 8", timeout=5000)
+    before = still.evaluate(BUBBLES)
+    still.wait_for_timeout(1500)
+    after = still.evaluate(BUBBLES)
+    size = still.evaluate("[document.getElementById('gp-board').clientWidth, document.getElementById('gp-board').clientHeight]")
+    def off_centre(b):
+        return math.hypot(b["x"] - size[0] / 2, b["y"] - size[1] / 2)
+    overlaps = [(p["id"], q["id"]) for i, p in enumerate(after) for q in after[i + 1:]
+                if math.hypot(p["x"] - q["x"], p["y"] - q["y"]) < p["r"] + q["r"]]
+    biggest = max(after, key=lambda b: b["r"])
+    def spots(bs):
+        return [(b["id"], b["x"], b["y"], b["r"]) for b in bs]
+    check(spots(before) == spots(after) and not overlaps and off_centre(biggest) == min(off_centre(b) for b in after),
+          "realtime: reduced motion holds a still, packed layout (moved=%s, overlaps=%s)"
+          % (spots(before) != spots(after), overlaps))
+
+    # ...and a full board of equally busy photos still fits without overlap.
+    full = [dict(e, id=10 ** 9 + n) for n, e in enumerate(flood[1:61])]
+    still.unroute(seed_ws)
+    still.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
+        {"stat": "ok", "result": {"events": full[::-1], "now": "2026-01-01 00:00:01"}})))
+    admin_page(still, ADMIN + "-realtime")
+    still.wait_for_function("gpRealtime.bubbles().length === 60", timeout=5000)
+    still.wait_for_timeout(300)
+    bs = still.evaluate(BUBBLES)
+    overlaps = sum(1 for i, p in enumerate(bs) for q in bs[i + 1:]
+                   if math.hypot(p["x"] - q["x"], p["y"] - q["y"]) < p["r"] + q["r"] - 0.5)
+    outside = sum(1 for b in bs if b["x"] < b["r"] - 0.5 or b["y"] < b["r"] - 0.5
+                  or b["x"] > size[0] - b["r"] + 0.5 or b["y"] > size[1] - b["r"] + 0.5)
+    check(len(bs) == 60 and overlaps == 0 and outside == 0 and min(b["r"] for b in bs) >= 15,
+          "realtime: reduced motion fits a full board of 60 without overlap (%d overlapping, %d outside, r %.0f)"
+          % (overlaps, outside, min(b["r"] for b in bs)))
+    still.close()
+
+    # A poll hanging across a hide/show must not stall the fresh generation's polling.
+    hung = ctx.new_page()
+    held, polls, parked = [], [], []
+    def hold_first(route):
+        polls.append(route.request.url)
+        if not held:
+            held.append(route)  # never answered until the end
+        elif parked:
+            parked.append(route)  # stop resyncing the clock for the stale-answer check
+        else:
+            later(route)
+    # The board's one event is 2 minutes old, so the status reads "quiet for 2 m".
+    def later(route, events=()):
+        route.fulfill(content_type="application/json",
+                      body=json.dumps({"stat": "ok", "result": {"events": list(events), "now": "2026-01-01 00:02:00"}}))
+    hung.route(seed_ws, lambda r: later(r, flood[5:6]))
+    hung.route(poll_ws, hold_first)
+    admin_page(hung, ADMIN + "-realtime")
+    hung.wait_for_timeout(1800)
+    first = len(polls)
+    hung.evaluate("""() => {
+      let hidden = true;
+      Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
+      document.dispatchEvent(new Event('visibilitychange'));
+      hidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    hung.wait_for_timeout(3000)
+    check(first == 1 and held and len(polls) >= 3,
+          "realtime: a poll hanging across a hide/show doesn't stall the restarted board (%d before, %d after)"
+          % (first, len(polls)))
+    # When the old poll finally answers, its `now` (read when it was asked, 5 minutes
+    # earlier) must not rewind the new board: no score jump, no false "active now".
+    parked.append(None)
+    hung.wait_for_timeout(1500)
+    score = lambda: hung.evaluate(BUBBLES)[0]["score"]
+    s0, st0 = score(), hung.inner_text("#gp-rt-status")
+    held[0].fulfill(content_type="application/json",
+                    body=json.dumps({"stat": "ok", "result": {"events": [], "now": "2025-12-31 23:57:00"}}))
+    hung.wait_for_timeout(1200)
+    s1, st1 = score(), hung.inner_text("#gp-rt-status")
+    for r in parked[1:]:
+        later(r)
+    check(s1 <= s0 and "quiet for 2 m" in st0 and "quiet for 2 m" in st1,
+          "realtime: a stale poll's late answer doesn't rewind the clock (score %.3f -> %.3f, status %r -> %r)"
+          % (s0, s1, st0, st1))
+    hung.close()
+
+    # The poll carries the database's clock.
+    data = page.evaluate("fetch('ws.php?format=json&method=galleryPulse.live&since_id=999999999').then(r => r.json())")
+    db_now = sql("SELECT NOW()")[0][0]
+    check(data.get("stat") == "ok" and abs(time.mktime(time.strptime(data["result"]["now"], "%Y-%m-%d %H:%M:%S"))
+                                           - time.mktime(time.strptime(db_now, "%Y-%m-%d %H:%M:%S"))) <= 2,
+          "realtime: poll returns the database's now (%s vs %s)" % (data.get("result", {}).get("now"), db_now))
+
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1500)
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event) "
+        "VALUES (NOW(), '%s', '%s', %s, %s, 'lightbox_view')" % ("a" * 32, token, other_img, cat))
+    page.wait_for_function("id => gpRealtime.bubbles().some(b => String(b.id) === id)", arg=str(other_img), timeout=5000)
+    page.wait_for_timeout(2500)
+    r1 = bubble_r(page, other_img)
+    check(r1 is not None and r1 > 20, "realtime: a view brings its photo onto the board (r=%s)" % r1)
+    sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event, value) VALUES "
+        + ", ".join("(NOW(), '%s', '%s', %s, %s, '%s', NULL)" % ("a" * 32, token, other_img, cat, ev)
+                    for ev in ("zoom", "save_intent", "download", "download", "download")))
+    page.wait_for_timeout(3500)
+    r2 = bubble_r(page, other_img)
+    check(r2 is not None and r2 > r1 + 2, "realtime: more activity grows it (r %s -> %s)" % (r1, r2))
+
+    big = max(page.evaluate(BUBBLES), key=lambda b: b["r"])
+    small = min(page.evaluate(BUBBLES), key=lambda b: b["r"])
+    check(big["r"] * 2 > 140 and "-sm." in big["src"] and (small["r"] * 2 > 140 or "-th." in small["src"]),
+          "realtime: big bubbles switch to the larger image, small ones keep the thumbnail (%s, %s)"
+          % (big["src"][-12:], small["src"][-12:]))
+
+    # Clicking goes to the photo's detail page, with no hover popup on the way.
+    page.evaluate("gpRealtime.stop()")
+    el = page.locator(".gp-bubble[data-id='%s']" % other_img)
+    el.hover()
+    page.wait_for_timeout(300)
+    check(not page.is_visible(".gp-preview"), "realtime: no hover popup over a bubble")
+    el.click()
+    page.wait_for_load_state()
+    check(("-photo&image_id=%s" % other_img) in page.url, "realtime: a bubble links to the photo detail (%s)" % page.url)
+
+    # Past the window, everything fades out.
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_function("gpRealtime.bubbles().length > 0", timeout=5000)
+    page.evaluate("gpRealtime.stop(); gpRealtime.tick(31 * 60000)")
+    check(page.evaluate(BUBBLES) == [] and page.locator(".gp-bubble").count() == 0 and page.is_visible(".gp-rt-empty"),
+          "realtime: 31 minutes later the board is empty again")
+    page.close()
+
+
 def ip_rows(sid, token, img, cat, delta=0):
     """Rows exercising the Event value suffix and the IP / location cell, oldest first."""
     sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, share_token, image_id, category_id, event, value, ip) VALUES "
@@ -744,7 +954,7 @@ def upgrade():
     before = sql(snap)
     urllib.request.urlopen(BASE + "index.php").read()
     cols = [r[0] for r in sql("SHOW COLUMNS FROM piwigo_pulse_event")]
-    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.6.0"]], "upgrade: plugin updated to 1.6.0")
+    check(sql("SELECT version FROM piwigo_plugins WHERE id = 'gallery_pulse'") == [["1.7.0"]], "upgrade: plugin updated to 1.7.0")
     check(cols[-2:] == ["device", "ip"], "upgrade: ip column added after device (%s)" % cols)
     check(sql("SHOW INDEX FROM piwigo_pulse_event WHERE Key_name = 'k_cat'") != [], "upgrade: album index added")
     check(sql(snap) == before and sql("SELECT COUNT(*) FROM piwigo_pulse_event WHERE ip IS NOT NULL") == [["0"]],
@@ -848,6 +1058,12 @@ def visitor_row(page, label):
     return next((r for r in rows if r[0] == label), None)
 
 
+def click_outside(page):
+    """A click on blank page, clear of the filters and the Events list."""
+    box = page.locator(".gp-wrap").bounding_box()
+    page.mouse.click(box["x"] + box["width"] - 4, box["y"] + 2)
+
+
 def filters(ctx, token, top_id, sub_id, top_img, sub_img):
     """1.6: per-tab sticky filters (period/range, album, events, guest), Visitors last IP and recent albums, sorting."""
     since = max_id()
@@ -928,6 +1144,48 @@ def filters(ctx, token, top_id, sub_id, top_img, sub_img):
     admin_page(page, ADMIN + "-photos&f=1&sort=name&dir=asc")
     check(page.locator("a.gp-reset").count() == 1, "reset: shown for a Photos sort alone")
     admin_page(page, ADMIN + "-photos&reset=1")
+
+    # 1.7: no Apply button; each control applies itself once settled.
+    admin_page(page, ADMIN + "-visitors&reset=1")
+    check(page.locator("#gp-filters button, #gp-filters [type=submit]").count() == 0, "auto-apply: no Apply button")
+    url = page.url
+    page.click("details.gp-multi summary")
+    page.click("details.gp-multi summary")
+    page.wait_for_timeout(1000)
+    check(page.url == url, "auto-apply: opening and closing Events unchanged doesn't reload")
+    page.click("details.gp-multi summary")
+    page.check("input[name='ev[]'][value=zoom]")
+    page.check("input[name='ev[]'][value=lightbox_view]")
+    page.wait_for_timeout(500)
+    check(page.url == url, "auto-apply: ticking events waits for the list to close")
+    with page.expect_navigation():
+        click_outside(page)
+    ticked = page.eval_on_selector_all("input[name='ev[]']:checked", "es => es.map(e => e.value)")
+    check(ticked == ["lightbox_view", "zoom"], "auto-apply: Events apply on a click outside the list (%s)" % ticked)
+    admin_page(page, ADMIN + "-visitors&reset=1")
+    page.fill("input[name=guest]", sid[:8])
+    page.wait_for_timeout(500)
+    check(page.url == ADMIN + "-visitors&reset=1", "auto-apply: typing a guest doesn't reload yet")
+    with page.expect_navigation():
+        page.press("input[name=guest]", "Enter")
+    names = [x[0] for x in page.eval_on_selector_all("#gp-visitors tbody tr", VISITOR_ROWS)]
+    check(names == [sid[:8]] and page.input_value("input[name=guest]") == sid[:8], "auto-apply: Guest applies on Enter (%s)" % names)
+    admin_page(page, ADMIN + "-visitors&reset=1")
+    page.fill("input[name=guest]", sid[:8])
+    with page.expect_navigation():
+        click_outside(page)
+    check(page.input_value("input[name=guest]") == sid[:8], "auto-apply: Guest applies on leaving the box")
+    admin_page(page, ADMIN + "-visitors&reset=1")
+    page.select_option("select[name=days]", "custom")
+    page.fill("input[name=from]", "2026-01-14")
+    page.wait_for_timeout(1500)
+    check(page.url == ADMIN + "-visitors&reset=1" and page.is_visible("input[name=to]"),
+          "auto-apply: a date range waits for its second date")
+    with page.expect_navigation(timeout=5000):
+        page.fill("input[name=to]", "2026-01-14")
+    check(visitor_row(page, sid[:8]) is not None and page.input_value("input[name=from]") == "2026-01-14"
+          and page.input_value("input[name=to]") == "2026-01-14", "auto-apply: a full date range applies itself")
+    admin_page(page, ADMIN + "-visitors&reset=1")
 
     # Avg dwell holds when the Event filter keeps only dwell (and so drops the views).
     sql("INSERT INTO piwigo_pulse_event (occurred_at, sid, image_id, category_id, event, value, detail) VALUES "
@@ -1063,7 +1321,7 @@ def admin(p, token):
     for tab in ("live", "photos", "visitors", "albums"):
         admin_page(page, ADMIN + "-" + tab + "&reset=1")
 
-    for tab in ("live", "photos", "visitors", "albums", "links", "settings"):
+    for tab in ("realtime", "live", "photos", "visitors", "albums", "links", "settings"):
         html, clean = admin_page(page, ADMIN + "-" + tab)
         check(clean and "gp-wrap" in html, "admin: %s tab renders without PHP errors" % tab)
     pad = page.eval_on_selector(".gp-wrap", "e => parseFloat(getComputedStyle(e).paddingLeft)")
@@ -1083,6 +1341,7 @@ def admin(p, token):
     live_poll(ctx, sid, token, top_img, top_id)
     live_trim(ctx, sid, token, top_img, top_id)
     live_album(ctx, sid, token, sub_id, sub_img)
+    realtime(ctx, sid, token, top_img, sub_img, sub_id)
     live_ip(ctx, sid, token, top_img, top_id)
     ip_tables(page, token, top_img, top_id)
     geoip_setting(page, token, top_img, top_id)

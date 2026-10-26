@@ -12,6 +12,11 @@ defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 define('GALLERY_PULSE_LIVE_PAGE', 500);
 define('GALLERY_PULSE_LIVE_POLL', 100);
 define('GALLERY_PULSE_LIVE_MAX_ROWS', 2000);
+// Real-time: events older than the window (minutes) are ignored, a photo's
+// score halves every half-life (minutes), and the board holds at most this many.
+define('GALLERY_PULSE_RT_WINDOW', 30);
+define('GALLERY_PULSE_RT_HALF_LIFE', 5);
+define('GALLERY_PULSE_RT_MAX_BUBBLES', 60);
 // Albums listed in a Visitors row before "+N more".
 define('GALLERY_PULSE_VISITOR_ALBUMS', 3);
 // Rows on the Photos and Visitors tabs.

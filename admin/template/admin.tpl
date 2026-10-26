@@ -49,13 +49,20 @@
     {foreach from=$GP_GUESTS item=g}<option value="{$g|escape}">{/foreach}
   </datalist>
   {/if}
-  <button type="submit" class="buttonLike">Apply</button>
   {if $GP_FILTERED && $GP_RESETTABLE}<a href="{$GP_BASE}&amp;reset=1" class="gp-reset">Reset filters</a>{/if}
 </form>
+{* No Apply button: each control applies itself once its value is settled. *}
 {footer_script}
 (function () {
   var form = document.getElementById('gp-filters');
   var range = form.querySelector('.gp-range');
+  function state() { return new URLSearchParams(new FormData(form)).toString(); }
+  var initial = state(), pending = null;
+  function apply() {
+    clearTimeout(pending);
+    if (state() !== initial) { form.submit(); }
+  }
+  form.addEventListener('submit', function (ev) { ev.preventDefault(); apply(); });
   form.querySelectorAll('select[data-submit]').forEach(function (sel) {
     sel.addEventListener('change', function () {
       if (sel.name === 'days') {
@@ -66,7 +73,45 @@
         }
         range.hidden = true;
       }
-      form.submit();
+      apply();
+    });
+  });
+  // Events: tick any number, applied when the list closes (or on a click
+  // outside it, which closes it).
+  var multi = form.querySelector('details.gp-multi');
+  if (multi) {
+    multi.addEventListener('toggle', function () { if (!multi.open) { apply(); } });
+    document.addEventListener('click', function (ev) {
+      if (multi.open && !multi.contains(ev.target)) { multi.open = false; }
+    });
+  }
+  // Guest: Enter, leaving the box, or a suggestion picked from the list.
+  // Dates: Enter, leaving the range, or both filled in. A typed date fires
+  // change on every keystroke that makes a valid date (year 0002, 0020...),
+  // so a full range waits for typing to pause.
+  form.querySelectorAll('input[type=search], input[type=date]').forEach(function (input) {
+    input.addEventListener('keydown', function (ev) {
+      clearTimeout(pending);
+      if (ev.key === 'Enter') { ev.preventDefault(); apply(); }
+    });
+  });
+  var guest = form.querySelector('input[name=guest]');
+  if (guest) {
+    guest.addEventListener('blur', apply);
+    guest.addEventListener('input', function (ev) {
+      if (!ev.inputType || ev.inputType === 'insertReplacementText') { apply(); }
+    });
+  }
+  range.addEventListener('focusout', function (ev) {
+    if (!range.contains(ev.relatedTarget)) { apply(); }
+  });
+  range.querySelectorAll('input').forEach(function (input) {
+    input.addEventListener('change', function () {
+      clearTimeout(pending);
+      var full = Array.prototype.every.call(range.querySelectorAll('input'), function (i) {
+        return /^[2-9]\d\d\d-/.test(i.value);
+      });
+      if (full) { pending = setTimeout(apply, 800); }
     });
   });
 })();
@@ -172,6 +217,332 @@
   });
 })();
 {/footer_script}
+
+{* ------------------------------------------------------------- Real-time *}
+{if $GP_TAB == 'realtime'}
+<p class="gp-note">Photos float up as guests view them, grow with views, zooms, saves and downloads, and fade after a quiet spell (a photo's activity halves every {$GP_RT_HALF_LIFE} minutes; nothing older than {$GP_RT_WINDOW} minutes counts). Click a photo for its details. Nothing here is kept — it starts fresh each time it's opened.</p>
+<p class="gp-rt-status" id="gp-rt-status">Loading…</p>
+<div class="gp-board" id="gp-board"><p class="gp-rt-empty">Waiting for guests — photos appear here as they're viewed.</p></div>
+{footer_script}
+(function () {
+  var board = document.getElementById('gp-board');
+  var status = document.getElementById('gp-rt-status');
+  var POLL = {$GP_LIVE_POLL}, MAX = {$GP_RT_MAX};
+  var WINDOW = {$GP_RT_WINDOW} * 60000, HALF = {$GP_RT_HALF_LIFE} * 60000;
+  var MIN_R = 24, MAX_R = 90, FLOOR = 0.15, ACTIVE = 5 * 60000;
+  var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // image_id => bubble; sid => last event time. Times are the database's
+  // clock in ms: resynced from every response, advanced by tick() between.
+  var bubbles = new Map(), guests = new Map();
+  var clock = null, lastEvent = null, sinceId = 0;
+
+  function utc(s) { return Date.parse(s.replace(' ', 'T') + 'Z'); }
+
+  function weight(e) {
+    switch (e.event) {
+      case 'lightbox_view': return e.detail === 'autoplay' ? 0.5 : 1;
+      case 'page_view': return 1;
+      case 'dwell': return (e.value || 0) / 10;
+      case 'zoom': return 2;
+      case 'save_intent': return 3;
+      case 'download': return 4;
+      default: return 1;
+    }
+  }
+
+  function score(b) { return b.score * Math.pow(0.5, (clock - b.scoreAt) / HALF); }
+
+  function bubble(e) {
+    var a = document.createElement('a');
+    a.className = 'gp-bubble';
+    a.setAttribute('data-id', e.image_id);
+    a.href = e.detail_url;
+    a.title = e.image_name || '';
+    var img = document.createElement('img');
+    img.src = e.thumb;
+    img.alt = '';
+    a.appendChild(img);
+    a.appendChild(document.createElement('span')).className = 'gp-ring';
+    board.appendChild(a);
+    var w = board.clientWidth, h = board.clientHeight;
+    return {
+      id: e.image_id, el: a, img: img, preview: e.preview, score: 0, scoreAt: clock, lastAt: 0,
+      x: w / 2 + (Math.random() - 0.5) * w * 0.5, y: h / 2 + (Math.random() - 0.5) * h * 0.5,
+      vx: 0, vy: 0, r: 0, heading: Math.random() * 2 * Math.PI
+    };
+  }
+
+  function add(e, live) {
+    var t = utc(e.occurred_at);
+    if (clock - t > WINDOW) { return; }
+    guests.set(e.sid, Math.max(guests.get(e.sid) || 0, t));
+    lastEvent = Math.max(lastEvent || 0, t);
+    // Album-only events just feed the status line.
+    if (!e.image_id || !e.thumb) { return; }
+    var b = bubbles.get(e.image_id);
+    if (!b) {
+      b = bubble(e);
+      bubbles.set(e.image_id, b);
+    }
+    b.score = score(b) + weight(e) * Math.pow(0.5, Math.max(0, clock - t) / HALF);
+    b.scoreAt = clock;
+    b.lastAt = Math.max(b.lastAt, t);
+    dirty = true;
+    if (live && !still) {
+      var kick = 60 + Math.random() * 60, dir = Math.random() * 2 * Math.PI;
+      b.vx += Math.cos(dir) * kick;
+      b.vy += Math.sin(dir) * kick;
+      var ring = b.el.lastChild;
+      ring.classList.remove('gp-pulse');
+      void ring.offsetWidth; // restart the animation
+      ring.classList.add('gp-pulse');
+    }
+  }
+
+  function remove(b) {
+    bubbles.delete(b.id);
+    board.removeChild(b.el);
+    dirty = true;
+  }
+
+  // Busy zips can flood the board: keep the highest scores.
+  function cap() {
+    if (bubbles.size <= MAX) { return; }
+    Array.from(bubbles.values()).sort(function (a, b) { return score(a) - score(b); })
+      .slice(0, bubbles.size - MAX).forEach(remove);
+  }
+
+  function ago(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    return s < 60 ? s + ' s' : s < 3600 ? Math.floor(s / 60) + ' m' : Math.floor(s / 3600) + ' h';
+  }
+
+  function showStatus() {
+    var n = 0;
+    guests.forEach(function (t, sid) {
+      if (clock - t > WINDOW) { guests.delete(sid); } else if (clock - t <= ACTIVE) { n++; }
+    });
+    status.textContent = (n === 1 ? '1 guest' : n + ' guests') + ' active'
+      + (lastEvent === null ? ' · no activity in the last ' + WINDOW / 60000 + ' minutes'
+        : clock - lastEvent < 10000 ? ' · active now' : ' · quiet for ' + ago(clock - lastEvent));
+  }
+
+  // Reduced motion: no animation at all. Sizes snap and the board is packed
+  // biggest-first on a spiral out from the centre, redone only when activity
+  // changes it (or every 30 s, for decay) — so it changes in steps, never glides.
+  var dirty = true, packedAt = 0;
+  function fits(b, placed, w, h) {
+    if (b.x < b.r || b.y < b.r || b.x > w - b.r || b.y > h - b.r) { return false; }
+    return placed.every(function (p) {
+      var dx = b.x - p.x, dy = b.y - p.y, min = b.r + p.r + 6;
+      return dx * dx + dy * dy >= min * min;
+    });
+  }
+  // Walk a spiral out to the corners for the first free spot; false if none.
+  function place(b, placed, w, h) {
+    for (var a = 0, d = 0, far = Math.sqrt(w * w + h * h) / 2; d <= far; a += Math.min(0.25, 10 / Math.max(d, 1))) {
+      d = 3 * a;
+      b.x = w / 2 + d * Math.cos(a);
+      b.y = h / 2 + d * Math.sin(a);
+      if (fits(b, placed, w, h)) { return true; }
+    }
+    return false;
+  }
+  // A full board of big bubbles can't fit at full size (60 × 180 px is more
+  // area than the board), so scale every radius to roughly fit the area first,
+  // then shrink further until each one finds a free spot.
+  function pack(list, w, h) {
+    var order = list.slice().sort(function (a, b) { return b.r - a.r || a.id - b.id; });
+    var base = order.map(function (b) { return b.r; });
+    var area = base.reduce(function (s, r) { return s + Math.PI * (r + 3) * (r + 3); }, 0);
+    var k = Math.min(1, Math.sqrt(0.5 * w * h / Math.max(area, 1)));
+    for (var tries = 0; tries < 20; tries++, k *= 0.9) {
+      var placed = [];
+      var ok = order.every(function (b, i) {
+        b.r = base[i] * k;
+        return place(b, placed, w, h) && placed.push(b);
+      });
+      if (ok) { return; }
+    }
+  }
+
+  // One step: decay, sizes, motion, then draw. Decay uses the whole dt, so a
+  // test can jump minutes ahead; motion is clamped to a short step.
+  var statusAt = 0;
+  function tick(dtMs) {
+    if (clock === null) { return; }
+    clock += dtMs;
+    var dt = Math.min(dtMs, 50) / 1000;
+    var w = board.clientWidth, h = board.clientHeight;
+    var list = Array.from(bubbles.values()), top = 4;
+    var resize = !still || dirty || clock - packedAt >= 30000 || dtMs > 1000;
+    if (resize) {
+      list.forEach(function (b) { b.s = score(b); top = Math.max(top, b.s); });
+      list.forEach(function (b) {
+        var gone = b.s < FLOOR || clock - b.lastAt > WINDOW;
+        var target = gone ? 0 : MIN_R + (MAX_R - MIN_R) * Math.sqrt(b.s / top);
+        b.r = still ? target : b.r + (target - b.r) * Math.min(1, dt * 4 + (dtMs > 1000 ? 1 : 0));
+        if (gone && b.r < 2) { remove(b); b.dead = true; }
+      });
+      list = list.filter(function (b) { return !b.dead; });
+    }
+    if (still) {
+      if (resize) { pack(list, w, h); packedAt = clock; dirty = false; }
+    } else {
+      drift(list, dt, w, h);
+    }
+    draw(list, w, h);
+    if (clock - statusAt >= 1000 || dtMs > 1000) { statusAt = clock; showStatus(); }
+  }
+
+  function drift(list, dt, w, h) {
+    list.forEach(function (b) {
+      var ax = (w / 2 - b.x) * 0.4, ay = (h / 2 - b.y) * 0.4;
+      b.heading += (Math.random() - 0.5) * dt * 3;
+      ax += Math.cos(b.heading) * 15;
+      ay += Math.sin(b.heading) * 15;
+      b.vx = (b.vx + ax * dt) * Math.exp(-2 * dt);
+      b.vy = (b.vy + ay * dt) * Math.exp(-2 * dt);
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    });
+    // Push overlapping pairs apart, a few passes so a crowd settles.
+    for (var pass = 0; pass < 3; pass++) {
+      for (var i = 0; i < list.length; i++) {
+        for (var j = i + 1; j < list.length; j++) {
+          var p = list[i], q = list[j];
+          var dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          var overlap = p.r + q.r + 6 - d;
+          if (overlap > 0) {
+            var mx = dx / d * overlap / 2, my = dy / d * overlap / 2;
+            p.x -= mx; p.y -= my; q.x += mx; q.y += my;
+          }
+        }
+      }
+    }
+  }
+
+  function draw(list, w, h) {
+    list.forEach(function (b) {
+      b.x = Math.min(Math.max(b.x, b.r), w - b.r);
+      b.y = Math.min(Math.max(b.y, b.r), h - b.r);
+      var size = 2 * b.r;
+      b.el.style.width = b.el.style.height = size + 'px';
+      b.el.style.transform = 'translate(' + (b.x - b.r) + 'px,' + (b.y - b.r) + 'px)';
+      // The thumbnail blurs past ~140 px: switch to the larger derivative.
+      if (size > 140 && b.preview && !b.big) { b.big = true; b.img.src = b.preview; }
+    });
+    board.classList.toggle('gp-board-empty', list.length === 0);
+  }
+
+  var frame = null, prev = 0;
+  function loop(ts) {
+    tick(prev ? Math.min(ts - prev, 1000) : 16);
+    prev = ts;
+    frame = requestAnimationFrame(loop);
+  }
+
+  // Resolves null for an answer from an older generation, before it can touch
+  // anything — its `now` was read when it was asked, possibly minutes ago.
+  function fetchEvents(query, mine) {
+    return fetch('{$GP_WS}&' + query, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (mine !== gen) { return null; }
+        if (data.stat !== 'ok') { throw new Error(data.message); }
+        clock = utc(data.result.now);
+        return data.result.events;
+      });
+  }
+
+  // Each (re)start is a generation: answers from an older one are dropped, so
+  // a seed or poll still in flight when the tab is re-shown can't double-count.
+  // Polling waits for a seed to set the cursor — since_id=0 would walk the
+  // whole table from its oldest row.
+  var gen = 0, ready = false;
+
+  // The newest page, newest first: Show older from the top.
+  function seed(mine) {
+    return fetchEvents('before_id=' + Number.MAX_SAFE_INTEGER, mine).then(function (events) {
+      if (events === null) { return; }
+      bubbles.forEach(remove);
+      guests.clear();
+      lastEvent = null;
+      events.forEach(function (e) { sinceId = Math.max(sinceId, e.id); });
+      events.slice().reverse().forEach(function (e) { add(e, false); });
+      cap();
+      tick(0);
+      showStatus();
+      ready = true;
+      schedule(1000);
+    });
+  }
+
+  // busy is the generation with a poll in flight: an older poll still hanging
+  // after a restart must neither block the new generation's polls nor, when
+  // it finally settles, clear their flag or schedule a second chain.
+  var busy = null, timer = null, empties = 0;
+  function poll() {
+    if (busy === gen || !ready) { return; }
+    var mine = busy = gen;
+    fetchEvents('since_id=' + sinceId, mine)
+      .then(function (events) {
+        if (events === null) { return 0; }
+        events.forEach(function (e) {
+          sinceId = Math.max(sinceId, e.id);
+          add(e, true);
+        });
+        cap();
+        return events.length;
+      })
+      .catch(function () { return 0; })
+      .then(function (count) {
+        if (busy === mine) { busy = null; }
+        if (mine !== gen || !ready) { return; }
+        if (count >= POLL) { poll(); return; }
+        empties = count > 0 ? 0 : empties + 1;
+        schedule(empties >= 3 ? 5000 : 1000);
+      });
+  }
+  function schedule(ms) {
+    clearTimeout(timer);
+    timer = document.hidden ? null : setTimeout(poll, ms);
+  }
+  // A failed seed retries with backoff (1 s, 2 s, 4 s … 30 s) and never polls.
+  function begin(mine, failures) {
+    seed(mine).catch(function () {
+      if (mine !== gen) { return; }
+      status.textContent = 'Could not load activity — retrying…';
+      clearTimeout(timer);
+      timer = document.hidden ? null
+        : setTimeout(function () { begin(mine, failures + 1); }, Math.min(30000, 1000 * Math.pow(2, failures)));
+    });
+  }
+  function start() {
+    empties = 0;
+    ready = false;
+    begin(++gen, 0);
+  }
+  // Hidden: stop. Shown again: start over from the newest rather than replay the gap.
+  document.addEventListener('visibilitychange', function () {
+    clearTimeout(timer);
+    if (!document.hidden) { start(); }
+  });
+  start();
+  frame = requestAnimationFrame(loop);
+
+  window.gpRealtime = {
+    tick: tick,
+    bubbles: function () {
+      return Array.from(bubbles.values()).map(function (b) {
+        return { id: b.id, r: b.r, score: score(b), x: b.x, y: b.y, src: b.img.src };
+      });
+    },
+    stop: function () { cancelAnimationFrame(frame); clearTimeout(timer); frame = null; }
+  };
+})();
+{/footer_script}
+{/if}
 
 {* ------------------------------------------------------------------ Live *}
 {if $GP_TAB == 'live'}
