@@ -706,7 +706,9 @@ def realtime(ctx, sid, token, img, other_img, cat):
               ev(4, B, "lightbox_view", "29:00")] + [ev(10 + i, B, "zoom", "29:00") for i in range(3)] \
              + [ev(20 + i, C, "download", "29:30") for i in range(9)] + [ev(40 + i, C, "zoom", "29:30") for i in range(40)] \
              + [ev(90, B, "save_intent", "29:10"), ev(91, C, "save_intent", "29:10"), ev(92, C, "save_intent", "29:20")] \
-             + [dict(ev(95 + i, B, "lightbox_view", "29:40"), sid="g%031d" % i) for i in range(2)]
+             + [dict(ev(95 + i, B, "lightbox_view", "29:40"), sid="g%031d" % i) for i in range(2)] \
+             + [ev(97, B, "page_view", "29:41"), dict(ev(98, B, "lightbox_view", "29:42"), detail="autoplay"),
+                dict(ev(99, C, "download", "29:43"), sid="0" * 32)]
     page.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
         {"stat": "ok", "result": {"events": marked[::-1], "now": "2026-01-01 00:30:00"}})))
     page.route(poll_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
@@ -722,6 +724,8 @@ def realtime(ctx, sid, token, img, other_img, cat):
           "realtime: 2 downloads draw a thin blue ring, no zoom bar (%s, %s)" % ({k: a.get(k) for k in ("ring", "bar")}, look))
     check(b.get("zooms") == 3 and b.get("ring") == 0 and 0 < b.get("bar", 0) < 1.39 * b.get("r", 0),
           "realtime: 3 zooms draw a bar inside the bubble, no ring (%s)" % {k: b.get(k) for k in ("ring", "bar", "r")})
+    check(c.get("downloads") == 10 and c.get("guests") == "",
+          "realtime: a no-beacon download counts, but not as a second guest (%s)" % ascii({k: c.get(k) for k in ("downloads", "guests")}))
     check(c.get("ring", 99) <= 6 and c.get("ring", 0) >= a.get("ring", 99) and c.get("bar", 0) <= 1.39 * c.get("r", 0),
           "realtime: 9 downloads and 40 zooms stay modest: ring <= 6 px, bar within the bubble (%s)"
           % {k: c.get(k) for k in ("ring", "bar", "r")})
@@ -745,7 +749,8 @@ def realtime(ctx, sid, token, img, other_img, cat):
     check(box and board["x"] + board["width"] - (box["x"] + box["width"]) < 20 and box["y"] - board["y"] < 20
           and rows.get("Views") == "3" and rows.get("Guests") == "3" and rows.get("Zooms") == "3"
           and rows.get("Save attempts") == "1" and rows.get("Downloads") == "0" and hit,
-          "realtime: hovering a photo shows its numbers top right, letting clicks through (%s)" % ascii(rows))
+          "realtime: hovering a photo shows its numbers top right, letting clicks through; Views leave out "
+          "autoplay and photo-page opens (%s)" % ascii(rows))
     page.dispatch_event(sel, "mouseleave")
     check(not page.is_visible("#gp-rt-info"), "realtime: the info panel goes when the pointer leaves")
     page.evaluate("gpRealtime.stop(); gpRealtime.tick(6 * 60000)")  # no poll resyncs the clock back
@@ -763,7 +768,7 @@ def realtime(ctx, sid, token, img, other_img, cat):
         return e
     g = ["t%031d" % i for i in range(5)]
     timed = [at(1, g[1], "29:50"), at(2, g[1], "29:20"), at(3, g[2], "29:30"), at(4, g[3], "25:30"),
-             at(5, g[4], "10:30", image_id=None, thumb=None), at(6, g[0], "00:00")]
+             at(5, g[4], "10:30", image_id=None, thumb=None), at(6, g[0], "00:00"), at(7, "0" * 32, "15:30", event="download")]
     page.route(seed_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
         {"stat": "ok", "result": {"events": timed[::-1], "now": "2026-01-01 00:30:00"}})))
     page.route(poll_ws, lambda r: r.fulfill(content_type="application/json", body=json.dumps(
@@ -774,9 +779,39 @@ def realtime(ctx, sid, token, img, other_img, cat):
     heights = page.eval_on_selector_all(".gp-rt-bars span", "s => s.map(e => e.getBoundingClientRect().height)")
     check(counts[29] == 2 and counts[25] == 1 and counts[10] == 1 and sum(counts) == 4
           and heights[29] > heights[25] > 0 and heights[0] == 0,
-          "realtime: the timeline counts distinct guests per minute, album views too, nothing past 30 min (%s)"
+          "realtime: the timeline counts distinct guests per minute, album views too, not no-beacon, nothing past 30 min (%s)"
           % {i: n for i, n in enumerate(counts) if n})
     page.evaluate("gpRealtime.stop()")  # no poll may slip into the next case's routes
+    page.unroute(seed_ws)
+    page.unroute(poll_ws)
+
+    # More than a page of events in the newest minutes: the seed pages back to the window's edge.
+    first_page = [dict(flood[0], id=5 * 10 ** 9 + 1000 - i, image_id=9 * 10 ** 6, sid="p" * 32,
+                       occurred_at="2026-01-01 00:%02d:%02d" % (29 - i // 120, 59 - i % 60)) for i in range(500)]
+    older = [at(20, "q" * 32, "20:00"), at(21, "r" * 32, "08:30", event="download", image_id=9 * 10 ** 6),
+             at(22, "s" * 32, "00:00")]
+    older = [dict(e, id=5 * 10 ** 9 + 400 - i) for i, e in enumerate(older)]
+    asked, polled = [], []
+    def paged(route):
+        asked.append(route.request.url.split("before_id=")[-1])
+        events = first_page if len(asked) == 1 else older if len(asked) == 2 else []
+        route.fulfill(content_type="application/json", body=json.dumps(
+            {"stat": "ok", "result": {"events": events, "now": "2026-01-01 00:30:00"}}))
+    def paged_poll(route):
+        polled.append(route.request.url.split("since_id=")[-1])
+        route.fulfill(content_type="application/json", body=json.dumps(
+            {"stat": "ok", "result": {"events": [], "now": "2026-01-01 00:30:00"}}))
+    page.route(seed_ws, paged)
+    page.route(poll_ws, paged_poll)
+    admin_page(page, ADMIN + "-realtime")
+    page.wait_for_timeout(1500)
+    counts = page.evaluate("gpRealtime.timeline()")
+    big = next((x for x in page.evaluate(BUBBLES) if x["id"] == 9 * 10 ** 6), {})
+    check(asked == [str(2 ** 53 - 1), str(first_page[-1]["id"])] and counts[19] == 1 and counts[8] == 1
+          and big.get("downloads") == 1 and polled and all(x == str(first_page[0]["id"]) for x in polled),
+          "realtime: a seed past one page backfills to the window's edge, then polls from the newest (pages %s, %s)"
+          % (asked, {i: n for i, n in enumerate(counts) if n}))
+    page.evaluate("gpRealtime.stop()")
     page.unroute(seed_ws)
     page.unroute(poll_ws)
 

@@ -228,7 +228,9 @@
 (function () {
   var board = document.getElementById('gp-board');
   var status = document.getElementById('gp-rt-status');
-  var POLL = {$GP_LIVE_POLL}, MAX = {$GP_RT_MAX};
+  var POLL = {$GP_LIVE_POLL}, MAX = {$GP_RT_MAX}, PAGE = {$GP_LIVE_PAGE}, SEED_PAGES = 40;
+  // Downloads made without a beacon cookie share this sid: not a guest.
+  var NO_SID = '{$GP_NO_SID}';
   var WINDOW = {$GP_RT_WINDOW} * 60000, HALF = {$GP_RT_HALF_LIFE} * 60000;
   var MIN_R = 16, MAX_R = 90, FLOOR = 0.15, MARK_R = 22;
   var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -292,7 +294,7 @@
   function add(e, live) {
     var t = utc(e.occurred_at);
     if (clock - t > WINDOW) { return; }
-    seen.push([e.sid, t]);
+    if (e.sid !== NO_SID) { seen.push([e.sid, t]); }
     // Album-only events just feed the timeline.
     if (!e.image_id || !e.thumb) { return; }
     var b = bubbles.get(e.image_id);
@@ -303,7 +305,7 @@
     b.score = score(b) + weight(e) * Math.pow(0.5, Math.max(0, clock - t) / HALF);
     b.scoreAt = clock;
     b.lastAt = Math.max(b.lastAt, t);
-    b.events.push({ t: t, event: e.event, value: e.value, sid: e.sid });
+    b.events.push({ t: t, event: e.event, value: e.value, detail: e.detail, sid: e.sid });
     dirty = true;
     if (live && !still) {
       var kick = 60 + Math.random() * 60, dir = Math.random() * 2 * Math.PI;
@@ -470,9 +472,10 @@
     b.events = b.events.filter(function (x) { return clock - x.t <= WINDOW; });
     var n = { views: 0, guests: new Set(), dwell: 0, zooms: 0, deepest: 0, saves: 0, downloads: 0 };
     b.events.forEach(function (x) {
-      n.guests.add(x.sid);
+      if (x.sid !== NO_SID) { n.guests.add(x.sid); }
       switch (x.event) {
-        case 'lightbox_view': case 'page_view': n.views++; break;
+        // As everywhere in Gallery Pulse: lightbox views, not slideshow autoplay.
+        case 'lightbox_view': if (!x.detail) { n.views++; } break;
         case 'dwell': n.dwell += x.value || 0; break;
         case 'zoom': n.zooms++; n.deepest = Math.max(n.deepest, x.value || 0); break;
         case 'save_intent': n.saves++; break;
@@ -568,9 +571,22 @@
   // whole table from its oldest row.
   var gen = 0, ready = false;
 
-  // The newest page, newest first: Show older from the top.
+  // Newest first, a page at a time (Show older from the top), back until a
+  // page reaches past the window — bounded, for a burst like a big zip.
   function seed(mine) {
-    return fetchEvents('before_id=' + Number.MAX_SAFE_INTEGER, mine).then(function (events) {
+    var all = [];
+    function page(before) {
+      return fetchEvents('before_id=' + before, mine).then(function (events) {
+        if (events === null) { return null; }
+        all = all.concat(events);
+        var oldest = events[events.length - 1];
+        if (events.length >= PAGE && all.length < PAGE * SEED_PAGES && clock - utc(oldest.occurred_at) <= WINDOW) {
+          return page(oldest.id);
+        }
+        return all;
+      });
+    }
+    return page(Number.MAX_SAFE_INTEGER).then(function (events) {
       if (events === null) { return; }
       bubbles.forEach(remove);
       seen = [];
