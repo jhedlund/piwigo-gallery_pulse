@@ -246,7 +246,7 @@
   // the timeline. Times are the database's clock in ms: resynced from every
   // response, advanced by tick() between.
   var bubbles = new Map(), seen = [];
-  var clock = null, sinceId = 0, highWater = 0;
+  var clock = null, sinceId = 0;
 
   function utc(s) { return Date.parse(s.replace(' ', 'T') + 'Z'); }
 
@@ -577,8 +577,7 @@
         if (mine !== gen) { return null; }
         if (data.stat !== 'ok') { throw new Error(data.message); }
         clock = utc(data.result.now);
-        highWater = Math.max(highWater, +data.result.max_id || 0);
-        return data.result.events;
+        return data.result;
       });
   }
 
@@ -591,13 +590,16 @@
   // The window's events, newest ids first, a page at a time (Show older from
   // the top, limited by the server to the window) until a short page — bounded,
   // for a burst like a big zip. A page comes back sorted by time, not id, so
-  // the cursor is its lowest id.
+  // the cursor is its lowest id. Polling starts from the first page's max_id,
+  // the table's top before that page was read: a later page's is newer, but
+  // an event between the two lies above the backfill and would be skipped.
   function seed(mine) {
-    var all = [], ids = new Set();
+    var all = [], ids = new Set(), top = null;
     function page(before) {
-      return fetchEvents('before_id=' + before + '&window=' + WINDOW / 60000, mine).then(function (events) {
-        if (events === null) { return null; }
-        var low = before;
+      return fetchEvents('before_id=' + before + '&window=' + WINDOW / 60000, mine).then(function (result) {
+        if (result === null) { return null; }
+        var events = result.events, low = before;
+        if (top === null) { top = +result.max_id || 0; }
         events.forEach(function (e) {
           low = Math.min(low, e.id);
           if (!ids.has(e.id)) { ids.add(e.id); all.push(e); }
@@ -609,7 +611,7 @@
       if (events === null) { return; }
       bubbles.forEach(remove);
       seen = [];
-      sinceId = Math.max(sinceId, highWater);
+      sinceId = Math.max(sinceId, top);
       events.forEach(function (e) { sinceId = Math.max(sinceId, e.id); });
       events.slice().reverse().forEach(function (e) { add(e, false); });
       cap();
@@ -629,8 +631,9 @@
     if (busy === gen || !ready) { return; }
     var mine = busy = gen;
     fetchEvents('since_id=' + sinceId, mine)
-      .then(function (events) {
-        if (events === null) { return 0; }
+      .then(function (result) {
+        if (result === null) { return 0; }
+        var events = result.events;
         events.forEach(function (e) {
           sinceId = Math.max(sinceId, e.id);
           add(e, true);

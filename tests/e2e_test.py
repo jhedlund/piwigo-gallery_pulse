@@ -809,8 +809,11 @@ def realtime(ctx, sid, token, img, other_img, cat):
     def paged(route):
         asked.append(route.request.url.split("before_id=")[-1])  # "<id>&window=30"
         events = first_page if len(asked) == 1 else older if len(asked) == 2 else []
+        # The table grows between pages: page 2's top (1001) is above the backfill,
+        # so polling must start from page 1's (1000) to receive event 1001.
+        top = 5 * 10 ** 9 + 999 + len(asked)
         route.fulfill(content_type="application/json", body=json.dumps(
-            {"stat": "ok", "result": {"events": events, "now": "2026-01-01 00:30:00"}}))
+            {"stat": "ok", "result": {"events": events, "now": "2026-01-01 00:30:00", "max_id": top}}))
     def paged_poll(route):
         polled.append(route.request.url.split("since_id=")[-1])
         route.fulfill(content_type="application/json", body=json.dumps(
